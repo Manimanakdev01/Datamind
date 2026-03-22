@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────
+#  DataMind AI — requirements.txt
+#  Streamlit Cloud deployment
+#
+#  Install locally:   pip install -r requirements.txt
+#  Python version:    3.10 or 3.11  (recommended)
+# ─────────────────────────────────────────────────────────────
+
+# ── Core app ──────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Data & ML ────────────────────────────────────────────────
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.4.0
+scipy>=1.11.0
+
+# ── Visualisation ────────────────────────────────────────────
+matplotlib>=3.7.0
+seaborn>=0.13.0
+
+# ── Explainability ───────────────────────────────────────────
+shap>=0.44.0
+
+# ── Deep Learning (optional — comment out if not needed) ─────
+# TensorFlow 2.15 is the last version that bundles keras 2 directly.
+# For TF 2.16+ you need the tf-keras shim (also listed below).
+tensorflow>=2.15.0,<2.17.0
+tf-keras>=2.15.0           # Keras 2 shim for TF 2.16+; harmless on 2.15
+
+# ── NLP / Text ───────────────────────────────────────────────
+# (TF Keras Tokenizer is used; no extra NLP package needed)
+
+# ── Computer Vision ──────────────────────────────────────────
+Pillow>=10.0.0             # PIL — image loading for CNN classifier
+ultralytics>=8.0.0         # YOLO auto-labeling (pip installs torch as dep)
+
+# ── Firebase ─────────────────────────────────────────────────
+# pyrebase4 is the actively maintained fork of pyrebase
+pyrebase4>=4.7.1
+requests>=2.31.0           # HTTP — Razorpay Orders API + Ollama calls
+
+# ── Payment ──────────────────────────────────────────────────
+# razorpay SDK is optional — the app calls the REST API directly via requests.
+# Uncomment if you prefer the official SDK:
+# razorpay>=1.4.0
+
+# ── QR code generation ───────────────────────────────────────
+qrcode[pil]>=7.4.2         # [pil] extra ensures Pillow backend is used
+
+# ── PDF handling ─────────────────────────────────────────────
+pdfplumber>=0.10.0         # primary PDF text extractor
+PyPDF2>=3.0.0              # fallback PDF reader
+
+# ─────────────────────────────────────────────────────────────
+#  NOTES FOR STREAMLIT CLOUD
+# ─────────────────────────────────────────────────────────────
+#
+#  1. Python version — add a .python-version file in your repo root:
+#       echo "3.11" > .python-version
+#
+#  2. TensorFlow on Streamlit Cloud uses ~1 GB RAM.
+#     If you hit memory limits, replace the tensorflow lines above with:
+#       tensorflow-cpu>=2.15.0,<2.17.0
+#
+#  3. Ultralytics pulls in torch (~700 MB). If you don't use YOLO,
+#     comment out the ultralytics line to keep the slug small.
+#
+#  4. Firebase secrets — store in Streamlit Cloud > App settings > Secrets:
+#       [firebase]
+#       api_key      = "..."
+#       database_url = "..."
+#       ...
+#     Then read with st.secrets["firebase"]["api_key"] and update _FB_CONFIG.
+#
+#  5. Razorpay secrets — same approach:
+#       [razorpay]
+#       key_id     = "rzp_live_..."
+#       key_secret = "..."
+#     Then at the top of main.py:
+#       RAZORPAY_KEY_ID     = st.secrets["razorpay"]["key_id"]
+#       RAZORPAY_KEY_SECRET = st.secrets["razorpay"]["key_secret"]
+# ─────────────────────────────────────────────────────────────
