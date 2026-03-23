@@ -25,7 +25,11 @@ shap>=0.43.0
 tensorflow-cpu>=2.13.0,<2.16.0
 
 # ── Computer Vision ──────────────────────────────────────────
-Pillow>=9.0.0,<11.0.0
+# ── Computer Vision ──────────────────────────────────────────
+Pillow>=10.0.0
+ultralytics
+torch
+torchvision
 
 # ── Firebase ─────────────────────────────────────────────────
 # pyrebase4 has strict sub-deps — keep it unpinned so pip resolves freely
