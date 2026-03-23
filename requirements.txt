@@ -30,7 +30,12 @@ Pillow>=10.0.0
 ultralytics
 torch
 torchvision
-
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+Pillow>=10.0.0
+ultralytics==8.1.23
+requests>=2.31.0
 # ── Firebase ─────────────────────────────────────────────────
 # pyrebase4 has strict sub-deps — keep it unpinned so pip resolves freely
 pyrebase4>=4.7.1
