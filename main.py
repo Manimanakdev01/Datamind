@@ -143,7 +143,7 @@ YOLO_API_URL = os.environ.get("YOLO_API_URL", "")
 # ── Gemini API key ───────────────────────────────────────────────────────────
 # Free key: aistudio.google.com/app/apikey
 # Add to Streamlit secrets: GEMINI_API_KEY = "AIza..."
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = "AIzaSyAxw02qU0aEkI4P4cOIgBEUJoeDEVW_a4w"
 
 # ── Razorpay — fill in YOUR values from razorpay.com/app/keys ────────────────
 # Use rzp_test_... keys for sandbox, rzp_live_... for production
