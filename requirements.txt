@@ -6,7 +6,7 @@
 #  Python version:    3.10 or 3.11  (recommended)
 # ─────────────────────────────────────────────────────────────
 
-# ── Core app ─────────────────────────────────────────────────
+# ── Core app ──────────────────────────────────────────────────
 streamlit>=1.35.0
 
 # ── Data & ML ────────────────────────────────────────────────
@@ -22,25 +22,36 @@ seaborn>=0.13.0
 # ── Explainability ───────────────────────────────────────────
 shap>=0.44.0
 
-# ── Deep Learning ────────────────────────────────────────────
+# ── Deep Learning (optional — comment out if not needed) ─────
+# TensorFlow 2.15 is the last version that bundles keras 2 directly.
+# For TF 2.16+ you need the tf-keras shim (also listed below).
 tensorflow>=2.15.0,<2.17.0
-tf-keras>=2.15.0
+tf-keras>=2.15.0           # Keras 2 shim for TF 2.16+; harmless on 2.15
+
+# ── NLP / Text ───────────────────────────────────────────────
+# (TF Keras Tokenizer is used; no extra NLP package needed)
 
 # ── Computer Vision ──────────────────────────────────────────
-Pillow>=10.0.0
-ultralytics==8.1.23
+
 
 # ── Firebase ─────────────────────────────────────────────────
+# pyrebase4 is the actively maintained fork of pyrebase
 pyrebase4>=4.7.1
-requests>=2.31.0
+requests>=2.31.0           # HTTP — Razorpay Orders API + Ollama calls
+
+# ── Payment ──────────────────────────────────────────────────
+# razorpay SDK is optional — the app calls the REST API directly via requests.
+# Uncomment if you prefer the official SDK:
+# razorpay>=1.4.0
 
 # ── QR code generation ───────────────────────────────────────
-qrcode[pil]>=7.4.2
+qrcode[pil]>=7.4.2         # [pil] extra ensures Pillow backend is used
 
 # ── PDF handling ─────────────────────────────────────────────
-pdfplumber>=0.10.0
-PyPDF2>=3.0.0
-
+pdfplumber>=0.10.0         # primary PDF text extractor
+PyPDF2>=3.0.0              # fallback PDF reader
+Pillow>=10.0.0
+ultralytics==8.1.23
 # ─────────────────────────────────────────────────────────────
 #  NOTES FOR STREAMLIT CLOUD
 # ─────────────────────────────────────────────────────────────
@@ -59,6 +70,7 @@ PyPDF2>=3.0.0
 #       [firebase]
 #       api_key      = "..."
 #       database_url = "..."
+#       ...
 #     Then read with st.secrets["firebase"]["api_key"] and update _FB_CONFIG.
 #
 #  5. Razorpay secrets — same approach:
@@ -68,4 +80,3 @@ PyPDF2>=3.0.0
 #     Then at the top of main.py:
 #       RAZORPAY_KEY_ID     = st.secrets["razorpay"]["key_id"]
 #       RAZORPAY_KEY_SECRET = st.secrets["razorpay"]["key_secret"]
-# ─────────────────────────────────────────────────────────────
