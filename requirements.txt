@@ -51,7 +51,8 @@ qrcode[pil]>=7.4.2         # [pil] extra ensures Pillow backend is used
 # ── PDF handling ─────────────────────────────────────────────
 pdfplumber>=0.10.0         # primary PDF text extractor
 PyPDF2>=3.0.0              # fallback PDF reader
-ultralytics>=8.3.233
+Pillow>=10.0.0
+ultralytics==8.1.23
 # ─────────────────────────────────────────────────────────────
 #  NOTES FOR STREAMLIT CLOUD
 # ─────────────────────────────────────────────────────────────
