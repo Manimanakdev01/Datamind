@@ -135,6 +135,11 @@ UPI_ID         = "8789390866@ybl"
 UPI_NAME       = "DataMind AI"
 UPI_NOTE       = "DataMindAI Premium 1 Month"
 
+# ── YOLO FastAPI microservice URL ─────────────────────────────────────────────
+# Deploy yolo_api.py on Railway/Render/VPS, paste the public URL here.
+# Or set env var: export YOLO_API_URL="https://your-api.railway.app"
+YOLO_API_URL = os.environ.get("YOLO_API_URL", "")
+
 # ── Razorpay — fill in YOUR values from razorpay.com/app/keys ────────────────
 # Use rzp_test_... keys for sandbox, rzp_live_... for production
 RAZORPAY_KEY_ID     = "rzp_live_XXXXXXXXXXXXXXXX"   # ← replace
@@ -3885,61 +3890,70 @@ elif page == "🤖 Auto Labeling":
 
                 if st.button("Run YOLO Detection", key="al_yrun",
                              use_container_width=True):
-                    try:
-                        from ultralytics import YOLO as _YOLO
-                        import PIL.Image as _PILImg
-                        import io as _imgio
+                    if not YOLO_API_URL:
+                        st.error(
+                            "YOLO API not configured. "
+                            "Deploy yolo_api.py and set YOLO_API_URL in main.py "
+                            "or as the environment variable YOLO_API_URL. "
+                            "See yolo_api.py for deployment instructions."
+                        )
+                    else:
+                        try:
+                            import base64 as _b64
+                            _filter_str   = ",".join(st.session_state.al_img_labels)
+                            _results_list = []
+                            _prog = st.progress(0, "Sending images to YOLO API...")
 
-                        _yolo_mdl = _YOLO(st.session_state.al_yolo_model)
-                        _filter   = st.session_state.al_img_labels
-                        _results_list = []
-                        _prog = st.progress(0, "Loading YOLO model...")
-
-                        for _ii, _img_file in enumerate(st.session_state.al_img_files):
-                            _img_bytes = _img_file.read()
-                            _pil_img   = _PILImg.open(_imgio.BytesIO(_img_bytes)).convert("RGB")
-                            _det = _yolo_mdl(_pil_img, conf=st.session_state.al_img_conf,
-                                             verbose=False)[0]
-                            _boxes = []
-                            for _box in _det.boxes:
-                                _cls_id  = int(_box.cls[0])
-                                _cls_nm  = _yolo_mdl.names[_cls_id]
-                                _conf_v  = float(_box.conf[0])
-                                _xyxy    = [round(float(v),1) for v in _box.xyxy[0]]
-                                if _filter and _cls_nm not in _filter:
+                            for _ii, _img_file in enumerate(st.session_state.al_img_files):
+                                _img_bytes = _img_file.read()
+                                _prog.progress(
+                                    _ii / _nim,
+                                    text=f"Detecting: {_img_file.name} ({_ii+1}/{_nim})"
+                                )
+                                _resp = _rq.post(
+                                    YOLO_API_URL.rstrip("/") + "/detect",
+                                    files={"file": (_img_file.name, _img_bytes, "image/jpeg")},
+                                    data={
+                                        "model":      st.session_state.al_yolo_model,
+                                        "confidence": str(st.session_state.al_img_conf),
+                                        "classes":    _filter_str,
+                                    },
+                                    timeout=60,
+                                )
+                                if _resp.status_code != 200:
+                                    st.error(f"API error on {_img_file.name}: {_resp.text}")
                                     continue
-                                _boxes.append({
-                                    "class":      _cls_nm,
-                                    "confidence": round(_conf_v,3),
-                                    "x1": _xyxy[0],"y1": _xyxy[1],
-                                    "x2": _xyxy[2],"y2": _xyxy[3],
+
+                                _data      = _resp.json()
+                                _ann_bytes = (
+                                    _b64.b64decode(_data["ann_image_b64"])
+                                    if _data.get("ann_image_b64") else _img_bytes
+                                )
+                                _results_list.append({
+                                    "filename":  _img_file.name,
+                                    "boxes":     _data.get("boxes", []),
+                                    "n_objects": _data.get("n_objects", 0),
+                                    "classes":   _data.get("classes", []),
+                                    "img_bytes": _img_bytes,
+                                    "ann_bytes": _ann_bytes,
                                 })
-                            # Annotated image from YOLO
-                            _ann_arr = _det.plot()
-                            _ann_img = _PILImg.fromarray(_ann_arr)
-                            _ann_buf = _imgio.BytesIO()
-                            _ann_img.save(_ann_buf, format="PNG")
+                                _prog.progress(
+                                    (_ii + 1) / _nim,
+                                    text=f"Done: {_img_file.name} ({_ii+1}/{_nim})"
+                                )
 
-                            _results_list.append({
-                                "filename":  _img_file.name,
-                                "boxes":     _boxes,
-                                "n_objects": len(_boxes),
-                                "classes":   list(set(b["class"] for b in _boxes)),
-                                "img_bytes": _img_bytes,
-                                "ann_bytes": _ann_buf.getvalue(),
-                            })
-                            _prog.progress((_ii+1)/_nim,
-                                text=f"Processing {_img_file.name} ({_ii+1}/{_nim})")
+                            st.session_state.al_img_results = _results_list
+                            st.success(f"Detection complete on {_nim} image(s)!")
 
-                        st.session_state.al_img_results = _results_list
-                        st.success(f"Detection complete on {_nim} image(s)!")
+                        except _rq.exceptions.ConnectionError:
+                            st.error(
+                                f"Cannot connect to YOLO API at {YOLO_API_URL}. "
+                                "Check the URL and make sure the service is running."
+                            )
+                        except Exception as _ye:
+                            st.error(f"YOLO API error: {_ye}")
 
-                    except ImportError:
-                        st.error("Ultralytics not installed. Run: pip install ultralytics")
-                    except Exception as _ye:
-                        st.error(f"YOLO error: {_ye}")
-
-                # ── Results display ──────────────────────────────
+                                # ── Results display ──────────────────────────────
                 if st.session_state.al_img_results:
                     _res_list = st.session_state.al_img_results
                     _tot_obj  = sum(r["n_objects"] for r in _res_list)
