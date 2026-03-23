@@ -3369,13 +3369,13 @@ elif page == "🤖 Auto Labeling":
         ("al_text_col",None),("al_mode","supervised"),
         ("al_review_df",None),("al_trained_model",None),
         ("al_trained_vec",None),("al_seed_data",{}),("al_n_clusters",5),
-        ("al_ollama_model","phi3"),("al_use_ollama",True),
-        ("al_ollama_thresh",0.72),
-        ("al_use_gemini",False),("al_gemini_model","gemini-1.5-flash"),
+        ("al_ensemble_thresh",0.72),
         # Image labeling
         ("al_img_files",[]),("al_img_results",[]),
-        ("al_yolo_model","yolov8n.pt"),("al_img_conf",0.4),
-        ("al_img_labels",[]),
+        ("al_img_conf",0.35),("al_img_labels",[]),
+        ("al_img_mode","imagenet"),
+        ("al_mobilenet_model",None),("al_mobilenet_extractor",None),
+        ("al_top_k",3),
     ]:
         if _k not in st.session_state: st.session_state[_k] = _v
 
@@ -3726,8 +3726,9 @@ elif page == "🤖 Auto Labeling":
                     with _ch2:
                         _fg2,_ax2 = plt.subplots(figsize=(4,3))
                         _ax2.hist(_r["__confidence"],bins=20,color=C_BLUE,alpha=.8,edgecolor="white")
-                        _ax2.axvline(_ct,color=C_RED,lw=1.5,linestyle="--",label=f"Threshold")
-                        if _uol: _ax2.axvline(st.session_state.al_ollama_thresh,color=C_PURPLE,lw=1.5,linestyle=":")
+                        _ens_thr = st.session_state.get("al_ensemble_thresh", 0.72)
+                        _ax2.axvline(_ct, color=C_RED, lw=1.5, linestyle="--", label="Accept threshold")
+                        _ax2.axvline(_ens_thr, color=C_PURPLE, lw=1.5, linestyle=":", label="Ensemble handoff")
                         _ax2.legend(fontsize=8); _ax2.set_title("Confidence Dist"); _fg2.tight_layout()
                         st.pyplot(_fg2); plt.close(_fg2)
                     with _ch3:
@@ -4046,21 +4047,20 @@ elif page == "🤖 Auto Labeling":
                                     _top_label = _sorted_sims[0][0] if _sorted_sims else "unknown"
                                     _top_conf  = _sorted_sims[0][1] if _sorted_sims else 0.0
 
-                                # Annotate image with top prediction text
-                                import cv2 as _cv2
-                                import numpy as _np2
-                                from PIL import Image as _PILImg
+                                # Annotate — pure Pillow only, no cv2/libGL needed
+                                from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
                                 import io as _imgio
-                                _pil = _PILImg.open(_imgio.BytesIO(_img_bytes)).convert("RGB")
-                                _arr = _np2.array(_pil)
-                                _ann = _cv2.cvtColor(_arr, _cv2.COLOR_RGB2BGR)
+                                _pil     = _PILImg.open(_imgio.BytesIO(_img_bytes)).convert("RGB")
+                                _ann_pil = _pil.copy()
+                                _draw    = _PILDraw.Draw(_ann_pil)
                                 _lbl_txt = f"{_top_label}  {_top_conf:.0%}"
-                                _cv2.rectangle(_ann, (0, 0), (_ann.shape[1], 36), (26,86,219), -1)
-                                _cv2.putText(_ann, _lbl_txt, (8, 25),
-                                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                                             (255, 255, 255), 2)
-                                _ann_rgb = _cv2.cvtColor(_ann, _cv2.COLOR_BGR2RGB)
-                                _ann_pil = _PILImg.fromarray(_ann_rgb)
+                                _draw.rectangle([0, 0, _ann_pil.width, 36], fill=(26, 86, 219))
+                                try:
+                                    _font = _PILFont.truetype(
+                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+                                except Exception:
+                                    _font = _PILFont.load_default()
+                                _draw.text((8, 8), _lbl_txt, fill=(255, 255, 255), font=_font)
                                 _ann_buf = _imgio.BytesIO()
                                 _ann_pil.save(_ann_buf, format="PNG")
 
@@ -4084,7 +4084,7 @@ elif page == "🤖 Auto Labeling":
 
                         except ImportError as _ie:
                             st.error(f"Missing dependency: {_ie}. "
-                                     "Ensure tensorflow-cpu and opencv-python-headless are installed.")
+                                     "Ensure tensorflow-cpu is installed (already in requirements.txt).")
                         except Exception as _ye:
                             st.error(f"Classification error: {_ye}")
                             st.exception(_ye)
