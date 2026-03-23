@@ -135,15 +135,6 @@ UPI_ID         = "8789390866@ybl"
 UPI_NAME       = "DataMind AI"
 UPI_NOTE       = "DataMindAI Premium 1 Month"
 
-# ── YOLO FastAPI microservice URL ─────────────────────────────────────────────
-# Deploy yolo_api.py on Railway/Render/VPS, paste the public URL here.
-# Or set env var: export YOLO_API_URL="https://your-api.railway.app"
-YOLO_API_URL = os.environ.get("YOLO_API_URL", "")
-
-# ── Gemini API key ───────────────────────────────────────────────────────────
-# Free key: aistudio.google.com/app/apikey
-# Add to Streamlit secrets: GEMINI_API_KEY = "AIza..."
-GEMINI_API_KEY = "AIzaSyAxw02qU0aEkI4P4cOIgBEUJoeDEVW_a4w"
 
 # ── Razorpay — fill in YOUR values from razorpay.com/app/keys ────────────────
 # Use rzp_test_... keys for sandbox, rzp_live_... for production
@@ -581,7 +572,7 @@ def _require_premium(feature_name="this feature"):
         'line-height:2.2;color:#374151;margin-bottom:1.2rem">'
         '<li>&#10003; Unlimited projects</li>'
         '<li>&#10003; Deep Learning &middot; CNN &middot; LSTM</li>'
-        '<li>&#10003; Ollama hybrid auto-labeling</li>'
+        '<li>&#10003; Auto Labeling (Ensemble + MobileNetV2)</li>'
         '<li>&#10003; NLP &amp; Chatbot training</li>'
         '<li>&#10003; SHAP explainability</li>'
         '</ul></div>', unsafe_allow_html=True)
@@ -1002,7 +993,7 @@ def _left_base(tagline, extra_html=""):
         '<div class="al-fs">Train &amp; evaluate ML models instantly</div></div></div>'
         '<div class="al-f"><div class="al-fi">&#127991;</div>'
         '<div><div class="al-ft">Auto Labeling Studio</div>'
-        '<div class="al-fs">Scale AI-style labeling + Ollama LLM</div></div></div>'
+        '<div class="al-fs">Scale AI-style labeling + Ensemble</div></div></div>'
         '<div class="al-f"><div class="al-fi">&#129504;</div>'
         '<div><div class="al-ft">Deep Learning &middot; CNN &middot; LSTM</div>'
         '<div class="al-fs">TensorFlow models in seconds</div></div></div>'
@@ -3148,7 +3139,7 @@ elif page == "💳 Pricing":
             <li>✅ NLP & Chatbot</li>
             <li>✅ Auto Labeling (TF-IDF)</li>
             <li>❌ Deep Learning / CNN / LSTM</li>
-            <li>❌ Ollama hybrid labeling</li>
+            <li>❌ Deep Learning (CNN/LSTM)</li>
             <li>❌ Firebase persistence</li>
           </ul>
           {"<div style='margin-top:.5rem'><span style='background:#fef3c7;color:#b45309;border-radius:20px;padding:3px 12px;font-size:0.75rem;font-weight:600'>Current Plan</span></div>" if (not _is_premium and not _is_pending) else ""}
@@ -3170,7 +3161,7 @@ elif page == "💳 Pricing":
             <li>✅ <strong>Unlimited</strong> projects</li>
             <li>✅ Everything in Free</li>
             <li>✅ Deep Learning · CNN · LSTM</li>
-            <li>✅ Ollama hybrid auto-labeling</li>
+            <li>✅ Ensemble + MobileNetV2 auto-labeling</li>
             <li>✅ Firebase persistence</li>
             <li>✅ SHAP explainability</li>
             <li>✅ Priority support</li>
@@ -3388,90 +3379,51 @@ elif page == "🤖 Auto Labeling":
     ]:
         if _k not in st.session_state: st.session_state[_k] = _v
 
-    # ── Ollama helpers ──────────────────────────────────────────
-    _OB = "http://localhost:11434"
-    _OM = ["phi3","llama3"]
+    # ── Ensemble text helpers (100% offline, pure sklearn) ─────────────
+    def _build_ensemble(texts_all, train_X, train_y):
+        """
+        Three-view soft-voting ensemble for text classification.
+          View A: TF-IDF word 1-2grams   + LogisticRegression
+          View B: TF-IDF char 3-5grams   + CalibratedLinearSVC
+          View C: TF-IDF word 1gram      + SGDClassifier
+        Returns a predict_proba(texts) -> (proba_matrix, classes) callable.
+        """
+        from sklearn.svm import LinearSVC
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.linear_model import SGDClassifier
 
-    def _opng():
-        try:
-            return _rq.get(f"{_OB}/api/tags",timeout=3).status_code==200
-        except: return False
+        vA = TfidfVectorizer(max_features=20000, ngram_range=(1,2),
+                             sublinear_tf=True, analyzer="word", min_df=1)
+        vB = TfidfVectorizer(max_features=30000, ngram_range=(3,5),
+                             sublinear_tf=True, analyzer="char_wb", min_df=1)
+        vC = TfidfVectorizer(max_features=15000, ngram_range=(1,1),
+                             sublinear_tf=True, analyzer="word", min_df=1)
 
-    def _omodels():
-        try:
-            return [m["name"].split(":")[0]
-                    for m in _rq.get(f"{_OB}/api/tags",timeout=3).json().get("models",[])]
-        except: return []
+        # Fit vectorizers on ALL texts so vocab covers the full corpus
+        vA.fit(texts_all); vB.fit(texts_all); vC.fit(texts_all)
 
-    def _olabel(text, labels, model="phi3", timeout=30):
-        _ls = ", ".join(f'"{l}"' for l in labels)
-        _pr = (f"Classify the text into EXACTLY ONE label: {_ls}.\n"
-               f"Reply with ONLY the label name.\nText: {text[:400]}\nLabel:")
-        try:
-            _r = _rq.post(f"{_OB}/api/generate",
-                json={"model":model,"prompt":_pr,"stream":False,
-                      "options":{"temperature":0.0,"num_predict":12}},timeout=timeout)
-            raw = _r.json().get("response","").strip().lower().strip('"\'')
-            for _l in labels:
-                if raw == _l.lower(): return _l, 0.95
-            for _l in labels:
-                if _l.lower() in raw: return _l, 0.80
-            return labels[0], 0.55
-        except: return labels[0], 0.40
+        clA = LogisticRegression(max_iter=1000, C=2.0, solver="saga", n_jobs=N_JOBS)
+        clB = CalibratedClassifierCV(LinearSVC(max_iter=2000, C=1.0), cv=3)
+        clC = SGDClassifier(loss="modified_huber", max_iter=500, random_state=42, n_jobs=N_JOBS)
 
-    # ── Gemini helpers ─────────────────────────────────────────────
-    _GEMINI_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"]
-    _GEMINI_URL    = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        XA = vA.transform(train_X)
+        XB = vB.transform(train_X)
+        XC = vC.transform(train_X)
 
-    def _gemini_label(text, labels, model="gemini-1.5-flash", api_key="", timeout=20):
-        """Call Gemini REST API to classify text. Returns (label, confidence)."""
-        if not api_key:
-            return labels[0], 0.40
-        _ls  = ", ".join(f'"{l}"' for l in labels)
-        _pr  = (f"Classify the text into EXACTLY ONE label: {_ls}.\n"
-                f"Reply with ONLY the label name, nothing else.\n"
-                f"Text: {text[:500]}\nLabel:")
-        _url = _GEMINI_URL.format(model=model) + "?key=" + api_key
-        try:
-            _r = _rq.post(
-                _url,
-                json={"contents": [{"parts": [{"text": _pr}]}],
-                      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 16}},
-                timeout=timeout,
-            )
-            _r.raise_for_status()
-            raw = (_r.json()
-                     .get("candidates", [{}])[0]
-                     .get("content", {})
-                     .get("parts", [{}])[0]
-                     .get("text", "")
-                     .strip().lower().strip('"\' '))
-            for _l in labels:
-                if raw == _l.lower(): return _l, 0.96
-            for _l in labels:
-                if _l.lower() in raw: return _l, 0.82
-            return labels[0], 0.55
-        except Exception:
-            return labels[0], 0.40
+        clA.fit(XA, train_y)
+        clB.fit(XB, train_y)
+        clC.fit(XC, train_y)
 
-    def _test_gemini(api_key, model):
-        """Quick connectivity test. Returns (ok, message)."""
-        if not api_key:
-            return False, "No API key set. Get one at aistudio.google.com/app/apikey"
-        try:
-            _url = _GEMINI_URL.format(model=model) + "?key=" + api_key
-            _r = _rq.post(
-                _url,
-                json={"contents": [{"parts": [{"text": "Reply OK only."}]}],
-                      "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4}},
-                timeout=10,
-            )
-            if _r.status_code == 200: return True, "Gemini connected!"
-            elif _r.status_code == 400: return False, "Invalid API key or model."
-            elif _r.status_code == 429: return False, "Rate limit — wait a moment."
-            else: return False, f"HTTP {_r.status_code}: {_r.text[:100]}"
-        except Exception as _te:
-            return False, str(_te)[:100]
+        _classes = clA.classes_
+
+        def _predict_proba(input_texts):
+            pA = clA.predict_proba(vA.transform(input_texts))
+            pB = clB.predict_proba(vB.transform(input_texts))
+            pC = clC.predict_proba(vC.transform(input_texts))
+            return (pA + pB + pC) / 3.0, _classes
+
+        return _predict_proba, _classes
+
 
     # ════════════════════════════════════════════════════════════
     #  HERO BANNER
@@ -3481,15 +3433,15 @@ elif page == "🤖 Auto Labeling":
       <div class="als-hero-title">&#127991; Auto Labeling Studio</div>
       <div class="als-hero-sub">
         Scale AI-style intelligent labeling &middot;
-        TF-IDF fast pass &rarr; Gemini / Ollama LLM refinement &middot;
-        Offline YOLO detection &middot; Human-in-the-loop review
+        Voting Ensemble text classification &middot;
+        MobileNetV2 offline image labeling &middot; Human-in-the-loop review
       </div>
       <div class="als-hero-chips">
         <span class="als-chip active">Text Labeling</span>
         <span class="als-chip active">Image Labeling</span>
-        <span class="als-chip active">Gemini AI</span>
-        <span class="als-chip active">Ollama LLM</span>
-        <span class="als-chip active">Offline YOLO</span>
+        <span class="als-chip active">Voting Ensemble</span>
+        <span class="als-chip active">MobileNetV2</span>
+        <span class="als-chip active">100% Offline</span>
         <span class="als-chip active">Human Review</span>
       </div>
     </div>""", unsafe_allow_html=True)
@@ -3507,7 +3459,7 @@ elif page == "🤖 Auto Labeling":
             '<div class="als-mode-card' + (' selected' if _txt_sel else '') + '">'
             '<div class="als-mode-icon">&#128203;</div>'
             '<div class="als-mode-title">Text Labeling</div>'
-            '<div class="als-mode-sub">CSV / tabular data &middot; TF-IDF + Ollama hybrid'
+            '<div class="als-mode-sub">CSV / tabular data &middot; TF-IDF + Voting Ensemble'
             ' &middot; Supervised &amp; unsupervised</div>'
             '</div>', unsafe_allow_html=True)
         if st.button("Select Text Mode", key="al_mode_txt",
@@ -3540,90 +3492,32 @@ elif page == "🤖 Auto Labeling":
             _s1 = st.container()
             with _s1:
                 st.markdown('<div class="als-section">'
-                            '<div class="als-section-title">LLM Configuration — Gemini or Ollama</div>',
+                            '<div class="als-section-title">Text Classification Engine</div>',
                             unsafe_allow_html=True)
-                _is_prem = st.session_state.auth_plan == "premium"
-
-                # ── LLM selector ───────────────────────────────────────
-                _llm_choice = st.radio(
-                    "LLM backend for Phase 2 refinement",
-                    ["None (TF-IDF only)", "Gemini (cloud, free tier)", "Ollama (local)"],
-                    horizontal=True, key="al_llm_choice",
-                    help="Gemini works on Streamlit Cloud. Ollama needs a local server."
-                )
-                _oon  = False
-                _ugem = False
-
-                # ── Gemini config ───────────────────────────────────────
-                if "Gemini" in _llm_choice:
-                    _ugem = True
-                    st.session_state.al_use_gemini = True
-                    st.session_state.al_use_ollama = False
-                    _gc1, _gc2, _gc3 = st.columns([2, 2, 1])
-                    with _gc1:
-                        _gkey = st.text_input(
-                            "Gemini API Key",
-                            value=GEMINI_API_KEY or st.session_state.get("al_gemini_key", ""),
-                            type="password",
-                            placeholder="AIza...",
-                            key="al_gemini_key_inp",
-                            help="Get free key at aistudio.google.com/app/apikey"
-                        )
-                        st.session_state["al_gemini_key"] = _gkey
-                    with _gc2:
-                        _gmodel = st.selectbox("Model", _GEMINI_MODELS,
-                                               key="al_gm_sel",
-                                               help="flash=fast+free, pro=smarter")
-                        st.session_state.al_gemini_model = _gmodel
-                    with _gc3:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("Test", key="al_gtest"):
-                            _gok, _gmsg = _test_gemini(_gkey, _gmodel)
-                            if _gok: st.success(_gmsg)
-                            else:    st.error(_gmsg)
+                st.markdown(
+                    '<div style="background:#eef4ff;border:1px solid #bdd3fc;border-radius:10px;'
+                    'padding:.7rem 1rem;font-size:.82rem;color:#1a56db;margin-bottom:.75rem">'
+                    '<strong>Two-phase pipeline:</strong> Phase 1 — fast TF-IDF pass on all rows &rarr; '
+                    'Phase 2 — low-confidence rows go through a <strong>Voting Ensemble</strong> '
+                    '(word n-grams + char n-grams + SGD) for a second opinion. '
+                    '100% offline, no API keys needed.</div>',
+                    unsafe_allow_html=True)
+                _ec1, _ec2 = st.columns(2)
+                with _ec1:
+                    _ens_thresh = st.slider(
+                        "Handoff threshold",
+                        0.40, 0.99,
+                        float(st.session_state.get("al_ensemble_thresh", 0.72)),
+                        0.01, key="al_ens_thresh",
+                        help="Rows where TF-IDF confidence < this go to the Voting Ensemble for a second opinion")
+                    st.session_state.al_ensemble_thresh = _ens_thresh
+                with _ec2:
                     st.markdown(
-                        '<div style="background:#f0fdf4;border:1px solid #86efac;'
-                        'border-radius:8px;padding:.5rem .85rem;font-size:.78rem;'
-                        'color:#166534;margin-top:.4rem">'
-                        '&#9989; Gemini 1.5 Flash: 15 RPM free &middot; '
-                        '1 million tokens/day &middot; Works on Streamlit Cloud</div>',
+                        '<div style="font-size:.78rem;color:#374151;margin-top:.25rem">'
+                        '<b>Phase 1:</b> TF-IDF + Logistic Regression (all rows)<br>'
+                        '<b>Phase 2:</b> Word bigrams + Char 5-grams + SGD voting<br>'
+                        '<b>Result:</b> Higher accuracy, full confidence calibration</div>',
                         unsafe_allow_html=True)
-
-                # ── Ollama config ───────────────────────────────────────
-                elif "Ollama" in _llm_choice:
-                    if not _is_prem:
-                        st.markdown('<span class="dm-badge gold">Ollama — Premium only</span>',
-                                    unsafe_allow_html=True)
-                    else:
-                        _oon = True
-                        st.session_state.al_use_ollama = True
-                        st.session_state.al_use_gemini = False
-                        _oc2, _oc3 = st.columns([2, 1])
-                        with _oc2:
-                            _om = st.selectbox("Model", _OM, key="al_om_sel")
-                            st.session_state.al_ollama_model = _om
-                        with _oc3:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Test", key="al_ping"):
-                                if _opng():
-                                    _av = _omodels()
-                                    if st.session_state.al_ollama_model in _av:
-                                        st.success("Ollama ready")
-                                    else:
-                                        st.warning(f"Run: ollama pull {st.session_state.al_ollama_model}")
-                                else:
-                                    st.error("Ollama offline — run: ollama serve")
-                else:
-                    st.session_state.al_use_ollama = False
-                    st.session_state.al_use_gemini = False
-
-                # ── Shared threshold ────────────────────────────────────
-                if _oon or _ugem:
-                    _oth = st.slider(
-                        "Handoff threshold — rows below this confidence go to LLM",
-                        0.40, 0.99, st.session_state.al_ollama_thresh, 0.01,
-                        key="al_oth_sl")
-                    st.session_state.al_ollama_thresh = _oth
                 st.markdown('</div>', unsafe_allow_html=True)
 
             st.markdown('<div class="als-section">'
@@ -3703,28 +3597,14 @@ elif page == "🤖 Auto Labeling":
             else:
                 _df2 = st.session_state.al_df.copy()
                 _tc2 = st.session_state.al_text_col
-                _uol  = st.session_state.al_use_ollama
-                _ugem = st.session_state.get("al_use_gemini", False)
-                _gkey = st.session_state.get("al_gemini_key", "") or GEMINI_API_KEY
-
-                if _ugem:
-                    _gmod = st.session_state.get("al_gemini_model", "gemini-1.5-flash")
-                    st.markdown(
-                        '<div style="background:#f0fdf4;border:1px solid #86efac;'
-                        'border-radius:10px;padding:.7rem 1rem;font-size:.8rem;'
-                        'color:#166534;margin-bottom:1rem;">'
-                        '<strong>Gemini hybrid pipeline active</strong> &mdash; '
-                        'TF-IDF labels all rows &rarr; low-confidence rows sent to '
-                        f'<strong>{_gmod}</strong></div>', unsafe_allow_html=True)
-                elif _uol:
-                    st.markdown(
-                        '<div style="background:#eef4ff;border:1px solid #bdd3fc;'
-                        'border-radius:10px;padding:.7rem 1rem;font-size:.8rem;'
-                        'color:#1a56db;margin-bottom:1rem;">'
-                        '<strong>Ollama hybrid pipeline active</strong> &mdash; '
-                        'TF-IDF labels all rows &rarr; low-confidence rows sent to '
-                        f'<strong>{st.session_state.al_ollama_model}</strong>'
-                        '</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="background:#eef4ff;border:1px solid #bdd3fc;'
+                    'border-radius:10px;padding:.6rem 1rem;font-size:.8rem;'
+                    'color:#1a56db;margin-bottom:.75rem;">'
+                    '<strong>Two-phase ensemble pipeline</strong> &mdash; '
+                    'TF-IDF + LogReg on all rows &rarr; Voting Ensemble '
+                    '(word + char + SGD) on low-confidence rows. Fully offline.'
+                    '</div>', unsafe_allow_html=True)
 
                 _ct = st.slider("Auto-accept threshold",0.5,1.0,0.80,0.01,key="al_ct")
 
@@ -3736,130 +3616,101 @@ elif page == "🤖 Auto Labeling":
                     _confs = [0.0]*len(_texts)
                     _srcs  = ["tfidf"]*len(_texts)
                     try:
-                        _ph1 = st.status("Phase 1 — TF-IDF fast pass", expanded=True)
+                        _ens_thresh = st.session_state.get("al_ensemble_thresh", 0.72)
+
+                        # ── Phase 1: TF-IDF + LogReg (fast pass, all rows) ────
+                        _ph1 = st.status("Phase 1 — TF-IDF + LogReg (all rows)", expanded=True)
                         with _ph1:
                             if _mode2 == "supervised":
-                                _lbls = st.session_state.al_labels
-                                _seeds = st.session_state.get("al_seed_data",{})
-                                _tx,_ty = [],[]
+                                _lbls  = st.session_state.al_labels
+                                _seeds = st.session_state.get("al_seed_data", {})
+                                _tx, _ty = [], []
                                 for _l in _lbls:
                                     for _e in [s.strip() for s in _seeds.get(_l,"").splitlines() if s.strip()]:
                                         _tx.append(_e); _ty.append(_l)
-                                for _l in _lbls: _tx.append(_l); _ty.append(_l)
-                                _v2 = TfidfVectorizer(max_features=10000,ngram_range=(1,2),sublinear_tf=True)
-                                _v2.fit(_texts+_tx)
-                                _cl = LogisticRegression(max_iter=1000,C=2.0,solver="saga",n_jobs=N_JOBS)
-                                _cl.fit(_v2.transform(_tx),_ty)
-                                _pr = _cl.predict_proba(_v2.transform(_texts))
-                                _preds = list(_cl.classes_[_pr.argmax(axis=1)])
-                                _confs = list(_pr.max(axis=1).astype(float))
-                                st.session_state.al_trained_model = _cl
-                                st.session_state.al_trained_vec   = _v2
+                                for _l in _lbls:
+                                    _tx.append(_l); _ty.append(_l)
+                                _v1  = TfidfVectorizer(max_features=10000, ngram_range=(1,2), sublinear_tf=True)
+                                _v1.fit(_texts + _tx)
+                                _cl1 = LogisticRegression(max_iter=1000, C=2.0, solver="saga", n_jobs=N_JOBS)
+                                _cl1.fit(_v1.transform(_tx), _ty)
+                                _pr1   = _cl1.predict_proba(_v1.transform(_texts))
+                                _preds = list(_cl1.classes_[_pr1.argmax(axis=1)])
+                                _confs = list(_pr1.max(axis=1).astype(float))
+                                st.session_state.al_trained_model = _cl1
+                                st.session_state.al_trained_vec   = _v1
                             else:
                                 from sklearn.cluster import KMeans
                                 from sklearn.preprocessing import normalize as _nm
-                                _nc2 = st.session_state.get("al_n_clusters",5)
-                                _v2 = TfidfVectorizer(max_features=6000,ngram_range=(1,2),sublinear_tf=True)
-                                _Xa = _v2.fit_transform(_texts)
-                                _km = KMeans(n_clusters=_nc2,random_state=42,n_init=12)
+                                _nc2 = st.session_state.get("al_n_clusters", 5)
+                                _v1  = TfidfVectorizer(max_features=6000, ngram_range=(1,2), sublinear_tf=True)
+                                _Xa  = _v1.fit_transform(_texts)
+                                _km  = KMeans(n_clusters=_nc2, random_state=42, n_init=12)
                                 _km.fit(_Xa)
                                 _preds = [f"cluster_{c}" for c in _km.labels_]
                                 _lbls  = [f"cluster_{i}" for i in range(_nc2)]
                                 st.session_state.al_labels = _lbls
-                                _Xd = _Xa.toarray()
-                                _Xn = _nm(_Xd); _Cn = _nm(_km.cluster_centers_)
-                                _confs = list((_Xn@_Cn.T).max(axis=1).astype(float))
-                            _nlo = sum(1 for c in _confs if c < st.session_state.al_ollama_thresh)
-                            st.write(f"TF-IDF done — {len(_texts)-_nlo:,} high-conf, {_nlo:,} to Ollama")
-                        _ph1.update(label="Phase 1 complete",state="complete")
+                                _Xn = (_nm(_Xa.toarray()))
+                                _Cn = _nm(_km.cluster_centers_)
+                                _confs = list((_Xn @ _Cn.T).max(axis=1).astype(float))
+                            _nlow = sum(1 for c in _confs if c < _ens_thresh)
+                            st.write(f"Phase 1 done — {len(_texts)-_nlow:,} high-confidence, "
+                                     f"{_nlow:,} rows need ensemble refinement")
+                        _ph1.update(label="Phase 1 complete ✓", state="complete")
 
-                        _run_phase2 = (_ugem or _uol) and _mode2 == "supervised" and _nlo > 0
-                        if _run_phase2:
-                            _ot2  = st.session_state.al_ollama_thresh
-                            _low  = [i for i, c in enumerate(_confs) if c < _ot2]
-
-                            if _ugem:
-                                # ── Phase 2: Gemini ──────────────────────────
-                                if not _gkey:
-                                    st.warning("No Gemini API key — skipping Phase 2. "
-                                               "Add it in the Setup tab.")
-                                else:
-                                    _gmod = st.session_state.get("al_gemini_model", "gemini-1.5-flash")
-                                    _ph2 = st.status(
-                                        f"Phase 2 — Gemini ({_gmod}) re-labeling {len(_low):,} rows",
-                                        expanded=True)
-                                    with _ph2:
-                                        _pg = st.progress(0, "Starting Gemini...")
-                                        _gem_errors = 0
-                                        for _ii, _idx in enumerate(_low):
-                                            _nl, _nc = _gemini_label(
-                                                _texts[_idx],
-                                                st.session_state.al_labels,
-                                                model=_gmod,
-                                                api_key=_gkey,
-                                            )
-                                            _preds[_idx] = _nl
-                                            _confs[_idx] = _nc
-                                            _srcs[_idx]  = f"gemini:{_gmod}"
-                                            _pg.progress(
-                                                (_ii + 1) / len(_low),
-                                                text=f"Row {_ii+1}/{len(_low)} → {_nl} ({_nc:.0%})")
-                                        st.write(f"Gemini labeled {len(_low):,} rows")
-                                    _ph2.update(label="Phase 2 (Gemini) complete", state="complete")
-
-                            elif _uol:
-                                # ── Phase 2: Ollama ──────────────────────────
-                                _om2 = st.session_state.al_ollama_model
-                                _ph2 = st.status(
-                                    f"Phase 2 — Ollama ({_om2}) re-labeling {len(_low):,} rows",
-                                    expanded=True)
-                                with _ph2:
-                                    _pg = st.progress(0, "Starting Ollama...")
-                                    if not _opng():
-                                        st.warning("Ollama offline — skipping Phase 2")
-                                    elif _om2 not in _omodels():
-                                        st.warning(f"Run: ollama pull {_om2}")
-                                    else:
-                                        for _ii, _idx in enumerate(_low):
-                                            _nl, _nc = _olabel(
-                                                _texts[_idx],
-                                                st.session_state.al_labels,
-                                                model=_om2)
-                                            _preds[_idx] = _nl
-                                            _confs[_idx] = _nc
-                                            _srcs[_idx]  = f"ollama:{_om2}"
-                                            _pg.progress(
-                                                (_ii + 1) / len(_low),
-                                                text=f"Row {_ii+1}/{len(_low)} → {_nl}")
-                                        st.write(f"Ollama labeled {len(_low):,} rows")
-                                _ph2.update(label="Phase 2 (Ollama) complete", state="complete")
+                        # ── Phase 2: Voting Ensemble (low-confidence rows only) ──
+                        if _mode2 == "supervised" and _nlow > 0:
+                            _low_idx = [i for i, c in enumerate(_confs) if c < _ens_thresh]
+                            _ph2 = st.status(
+                                f"Phase 2 — Voting Ensemble refining {len(_low_idx):,} rows",
+                                expanded=True)
+                            with _ph2:
+                                _pg2 = st.progress(0, "Building ensemble (word + char + SGD)...")
+                                _predict_fn, _ens_classes = _build_ensemble(
+                                    _texts, _tx, _ty)
+                                _pg2.progress(0.4, "Running ensemble on low-confidence rows...")
+                                _low_texts  = [_texts[i] for i in _low_idx]
+                                _ens_proba, _ = _predict_fn(_low_texts)
+                                for _k, _idx in enumerate(_low_idx):
+                                    _best_cls = int(_ens_proba[_k].argmax())
+                                    _ens_conf = float(_ens_proba[_k].max())
+                                    # Only override if ensemble is more confident
+                                    if _ens_conf > _confs[_idx]:
+                                        _preds[_idx] = str(_ens_classes[_best_cls])
+                                        _confs[_idx] = _ens_conf
+                                        _srcs[_idx]  = "ensemble"
+                                _pg2.progress(1.0, "Ensemble done")
+                                _upgraded = sum(1 for s in _srcs if s == "ensemble")
+                                st.write(f"Ensemble upgraded confidence on {_upgraded:,} rows")
+                            _ph2.update(label="Phase 2 complete ✓", state="complete")
 
                         _res = _df2.copy()
                         _res["__predicted_label"] = _preds
-                        _res["__confidence"]      = np.round(np.array(_confs,dtype=float),4)
+                        _res["__confidence"]      = np.round(np.array(_confs, dtype=float), 4)
                         _res["__source"]          = _srcs
                         _res["__status"]          = [
-                            "auto-accepted" if c>=_ct else "needs review"
+                            "auto-accepted" if c >= _ct else "needs review"
                             for c in _confs]
                         st.session_state.al_results   = _res
                         st.session_state.al_review_df = _res.copy()
                         st.success("Auto-labeling complete! Check the Review Queue tab.")
                     except Exception as _err:
                         st.error(f"Error: {_err}")
+                        st.exception(_err)
+
 
                 if st.session_state.al_results is not None:
                     _r = st.session_state.al_results
                     _s1c,_s2c,_s3c,_s4c,_s5c = st.columns(5)
                     _nacc = (_r["__status"]=="auto-accepted").sum()
                     _nrev = (_r["__status"]=="needs review").sum()
-                    _noll = int((_r["__source"].str.startswith("ollama") |
-                                 _r["__source"].str.startswith("gemini")).sum()) if "__source" in _r.columns else 0
+                    _nens = int((_r["__source"] == "ensemble").sum()) if "__source" in _r.columns else 0
                     for _col,_val,_lbl,_cls in [
                         (_s1c,len(_r),"Total",""),
                         (_s2c,_nacc,"Accepted","green"),
                         (_s3c,_nrev,"Review","gold"),
                         (_s4c,f'{float(_r["__confidence"].mean()):.0%}',"Avg Conf",""),
-                        (_s5c,_noll,"LLM Labeled","purple"),
+                        (_s5c,_nens,"Ensemble Ph2","purple"),
                     ]:
                         _col.markdown(
                             f'<div class="als-stat"><div class="als-stat-val {_cls}">{_val}</div>'
@@ -3883,7 +3734,7 @@ elif page == "🤖 Auto Labeling":
                         if "__source" in _r.columns:
                             _sc = _r["__source"].value_counts()
                             _fg3,_ax3 = plt.subplots(figsize=(4,3))
-                            _ax3.pie(_sc.values,labels=[s.replace("tfidf","TF-IDF").replace("ollama:","LLM:") for s in _sc.index],
+                            _ax3.pie(_sc.values,labels=[s.replace("tfidf","TF-IDF").replace("ensemble","Ensemble") for s in _sc.index],
                                      colors=[C_BLUE,C_PURPLE,C_GOLD,C_GREEN][:len(_sc)],
                                      autopct="%1.0f%%",startangle=90)
                             _ax3.set_title("Source Split"); _fg3.tight_layout()
@@ -3947,11 +3798,11 @@ elif page == "🤖 Auto Labeling":
                 _ea=(_exp["__status"]=="auto-accepted").sum()
                 _ec=(_exp["__status"]=="corrected").sum()
                 _ep=(_exp["__status"]=="needs review").sum()
-                _eo=int(_exp["__source"].str.startswith("ollama").sum()) if "__source" in _exp.columns else 0
+                _eo=int((_exp["__source"]=="ensemble").sum()) if "__source" in _exp.columns else 0
                 _e1,_e2,_e3,_e4,_e5 = st.columns(5)
                 for _col,_val,_lbl,_cls in [
                     (_e1,len(_exp),"Total",""),(_e2,_ea,"Accepted","green"),
-                    (_e3,_ec,"Corrected",""),(_e4,_ep,"Pending","gold"),(_e5,_eo,"Ollama","purple")]:
+                    (_e3,_ec,"Corrected",""),(_e4,_ep,"Pending","gold"),(_e5,_eo,"Ensemble","purple")]:
                     _col.markdown(f'<div class="als-stat"><div class="als-stat-val {_cls}">{_val}</div>'
                                   f'<div class="als-stat-lbl">{_lbl}</div></div>',unsafe_allow_html=True)
                 st.markdown('<div class="dm-divider"></div>',unsafe_allow_html=True)
@@ -3969,264 +3820,151 @@ elif page == "🤖 Auto Labeling":
                 st.dataframe(_exp.head(20),use_container_width=True)
 
     # ════════════════════════════════════════════════════════════
-    #  IMAGE LABELING — Offline (cv2.dnn + YOLOv4-tiny)
+    #  IMAGE LABELING — MobileNetV2 (100% offline, tf.keras)
     # ════════════════════════════════════════════════════════════
     else:
         _img_tab1, _img_tab2, _img_tab3 = st.tabs(
-            ["⚙️  Setup & Upload", "🔍  Detect & Label", "📥  Export"])
+            ["⚙️  Setup & Upload", "🔍  Classify & Label", "📥  Export"])
 
-        # ── COCO class names (80 classes) ────────────────────────────────
-        _COCO_CLASSES = [
-            "person","bicycle","car","motorbike","aeroplane","bus","train","truck",
-            "boat","traffic light","fire hydrant","stop sign","parking meter","bench",
-            "bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe",
-            "backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard",
-            "sports ball","kite","baseball bat","baseball glove","skateboard","surfboard",
-            "tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl",
-            "banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza",
-            "donut","cake","chair","sofa","pottedplant","bed","diningtable","toilet",
-            "tvmonitor","laptop","mouse","remote","keyboard","cell phone","microwave",
-            "oven","toaster","sink","refrigerator","book","clock","vase","scissors",
-            "teddy bear","hair drier","toothbrush",
-        ]
-
-        # ── Model download helpers ────────────────────────────────────────
-        _YOLO_MODELS = {
-            "YOLOv4-tiny (23 MB — fastest)": {
-                "cfg":     "https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg",
-                "weights": "https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights",
-                "size":    416,
-                "key":     "yolov4-tiny",
-            },
-            "YOLOv3-tiny (34 MB — balanced)": {
-                "cfg":     "https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg",
-                "weights": "https://pjreddie.com/media/files/yolov3-tiny.weights",
-                "size":    416,
-                "key":     "yolov3-tiny",
-            },
-            "YOLOv3-full (237 MB — most accurate)": {
-                "cfg":     "https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3.cfg",
-                "weights": "https://pjreddie.com/media/files/yolov3.weights",
-                "size":    608,
-                "key":     "yolov3",
-            },
-        }
-
-        import os as _os
-
-        def _model_dir():
-            d = _os.path.join(_os.path.expanduser("~"), ".datamind_models")
-            _os.makedirs(d, exist_ok=True)
-            return d
-
-        def _download_file(url, dest_path, label=""):
-            """Download with progress bar using requests (already in requirements)."""
-            if _os.path.exists(dest_path):
-                return True
+        # ── ImageNet top-1000 class names (shortened) ────────────────────
+        # Full list loaded lazily from keras only when needed
+        def _get_mobilenet(extractor_only=False):
+            """Load and cache MobileNetV2. Returns (full_model, feature_extractor)."""
             try:
-                _prog_dl = st.progress(0, text=f"Downloading {label}...")
-                resp = _rq.get(url, stream=True, timeout=120)
-                resp.raise_for_status()
-                total = int(resp.headers.get("content-length", 0))
-                downloaded = 0
-                with open(dest_path, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 256):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            _prog_dl.progress(
-                                min(downloaded / total, 1.0),
-                                text=f"Downloading {label}: {downloaded // 1024 // 1024} MB / {total // 1024 // 1024} MB"
-                            )
-                _prog_dl.empty()
-                return True
-            except Exception as _de:
-                st.error(f"Download failed: {_de}")
-                if _os.path.exists(dest_path):
-                    _os.remove(dest_path)
-                return False
+                import tensorflow as _tf
+                if st.session_state.get("al_mobilenet_model") is None:
+                    with st.spinner("Loading MobileNetV2 weights (~14 MB, one time)..."):
+                        _full  = _tf.keras.applications.MobileNetV2(
+                            weights="imagenet", include_top=True)
+                        _feat  = _tf.keras.Model(
+                            inputs =_full.input,
+                            outputs=_full.layers[-2].output)  # 1280-dim embeddings
+                        st.session_state.al_mobilenet_model    = _full
+                        st.session_state.al_mobilenet_extractor= _feat
+                return (st.session_state.al_mobilenet_model,
+                        st.session_state.al_mobilenet_extractor)
+            except Exception as _me:
+                st.error(f"TensorFlow error: {_me}")
+                return None, None
 
-        def _load_yolo_net(model_info):
-            """Download if needed and load YOLO via cv2.dnn. Cached in session state."""
-            import cv2 as _cv2
-            cache_key = "al_cv2_net_" + model_info["key"]
-            if cache_key in st.session_state and st.session_state[cache_key] is not None:
-                return st.session_state[cache_key]
-
-            mdir    = _model_dir()
-            cfg_p   = _os.path.join(mdir, model_info["key"] + ".cfg")
-            wgt_p   = _os.path.join(mdir, model_info["key"] + ".weights")
-
-            with st.status("Preparing YOLO model (one-time download)...", expanded=True) as _st:
-                _st.write("Downloading config file...")
-                if not _download_file(model_info["cfg"], cfg_p, "config"):
-                    return None
-                _st.write("Downloading weights...")
-                if not _download_file(model_info["weights"], wgt_p, "weights"):
-                    return None
-                _st.write("Loading model into cv2.dnn...")
-                net = _cv2.dnn.readNetFromDarknet(cfg_p, wgt_p)
-                net.setPreferableBackend(_cv2.dnn.DNN_BACKEND_OPENCV)
-                net.setPreferableTarget(_cv2.dnn.DNN_TARGET_CPU)
-                st.session_state[cache_key] = net
-                _st.update(label="Model ready!", state="complete")
-            return net
-
-        def _detect_objects(net, image_bytes, inp_size, conf_thresh, class_filter):
-            """Run cv2.dnn YOLO detection. Returns list of box dicts + annotated PIL image."""
-            import cv2 as _cv2
+        def _preprocess_image(image_bytes, target_size=(224, 224)):
+            """Decode bytes → preprocessed numpy array for MobileNetV2."""
+            import tensorflow as _tf
             import numpy as _np2
-            from PIL import Image as _PILImg
+            from PIL import Image as _PILI
             import io as _imgio
+            img = _PILI.open(_imgio.BytesIO(image_bytes)).convert("RGB").resize(target_size)
+            arr = _np2.array(img, dtype=_np2.float32)
+            arr = _tf.keras.applications.mobilenet_v2.preprocess_input(arr)
+            return arr[_np2.newaxis, ...]   # (1, 224, 224, 3)
 
-            # Decode image
-            arr   = _np2.frombuffer(image_bytes, dtype=_np2.uint8)
-            img   = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
-            if img is None:
-                _pil = _PILImg.open(_imgio.BytesIO(image_bytes)).convert("RGB")
-                img  = _cv2.cvtColor(_np2.array(_pil), _cv2.COLOR_RGB2BGR)
-            H, W  = img.shape[:2]
+        def _imagenet_predict(model, image_bytes, top_k=3):
+            """Run MobileNetV2 on one image. Returns list of (class_name, score) tuples."""
+            import tensorflow as _tf
+            _arr   = _preprocess_image(image_bytes)
+            _preds = model.predict(_arr, verbose=0)
+            _dec   = _tf.keras.applications.mobilenet_v2.decode_predictions(
+                _preds, top=top_k)[0]
+            return [(cls_name.replace("_", " "), float(score))
+                    for (_, cls_name, score) in _dec]
 
-            # Build blob and forward pass
-            blob = _cv2.dnn.blobFromImage(
-                img, 1 / 255.0, (inp_size, inp_size),
-                swapRB=True, crop=False
-            )
-            net.setInput(blob)
-            layer_names  = net.getLayerNames()
-            out_layers   = [layer_names[i - 1]
-                            for i in net.getUnconnectedOutLayers().flatten()]
-            outs = net.forward(out_layers)
+        def _extract_features(extractor, image_bytes):
+            """Return 1280-dim feature vector for custom-label matching."""
+            import numpy as _np2
+            _arr = _preprocess_image(image_bytes)
+            return extractor.predict(_arr, verbose=0)[0]  # (1280,)
 
-            # Parse detections
-            boxes_raw, confidences, class_ids = [], [], []
-            for out in outs:
-                for det in out:
-                    scores   = det[5:]
-                    cls_id   = int(_np2.argmax(scores))
-                    conf     = float(scores[cls_id])
-                    if conf < conf_thresh:
-                        continue
-                    cx, cy, bw, bh = det[0]*W, det[1]*H, det[2]*W, det[3]*H
-                    x1 = int(cx - bw / 2)
-                    y1 = int(cy - bh / 2)
-                    boxes_raw.append([x1, y1, int(bw), int(bh)])
-                    confidences.append(conf)
-                    class_ids.append(cls_id)
-
-            # NMS
-            indices = _cv2.dnn.NMSBoxes(boxes_raw, confidences, conf_thresh, 0.4)
-            indices = indices.flatten() if len(indices) else []
-
-            boxes = []
-            for idx in indices:
-                x, y, bw, bh = boxes_raw[idx]
-                cls_nm = _COCO_CLASSES[class_ids[idx]] if class_ids[idx] < len(_COCO_CLASSES) else "unknown"
-                if class_filter and cls_nm not in class_filter:
-                    continue
-                boxes.append({
-                    "class":      cls_nm,
-                    "confidence": round(float(confidences[idx]), 3),
-                    "x1": max(0, x),
-                    "y1": max(0, y),
-                    "x2": min(W, x + bw),
-                    "y2": min(H, y + bh),
-                })
-
-            # Draw annotations on image
-            ann_img = img.copy()
-            colors  = {}
-            for b in boxes:
-                cls_nm = b["class"]
-                if cls_nm not in colors:
-                    _np2.random.seed(hash(cls_nm) % (2**32))
-                    colors[cls_nm] = tuple(int(c) for c in _np2.random.randint(100, 255, 3))
-                color = colors[cls_nm]
-                x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
-                _cv2.rectangle(ann_img, (x1, y1), (x2, y2), color, 2)
-                label_text = f"{cls_nm} {b['confidence']:.2f}"
-                (tw, th), _ = _cv2.getTextSize(label_text, _cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-                _cv2.rectangle(ann_img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-                _cv2.putText(ann_img, label_text, (x1 + 2, y1 - 4),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-
-            ann_rgb = _cv2.cvtColor(ann_img, _cv2.COLOR_BGR2RGB)
-            ann_pil = _PILImg.fromarray(ann_rgb)
-            ann_buf = _imgio.BytesIO()
-            ann_pil.save(ann_buf, format="PNG")
-
-            return boxes, ann_buf.getvalue()
+        def _cosine_sim(a, b):
+            import numpy as _np2
+            na, nb = _np2.linalg.norm(a), _np2.linalg.norm(b)
+            if na == 0 or nb == 0: return 0.0
+            return float(_np2.dot(a, b) / (na * nb))
 
         # ── IMG TAB 1 SETUP ──────────────────────────────────────────────
         with _img_tab1:
             st.markdown(
                 '<div class="als-section">'
-                '<div class="als-section-title">Model Selection</div>',
+                '<div class="als-section-title">Model & Mode</div>',
                 unsafe_allow_html=True)
-
             st.markdown(
                 '<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;'
                 'padding:.75rem 1rem;font-size:.82rem;color:#166534;margin-bottom:.8rem">'
-                '&#9989; Fully offline — uses <strong>OpenCV cv2.dnn</strong> (already installed). '
-                'No ultralytics, no torch, no API needed. '
-                'Model weights download once (~23 MB) and are cached locally.</div>',
+                '&#9989; <strong>MobileNetV2</strong> — pretrained on ImageNet 1000 classes. '
+                'Weights download once (~14 MB) and are cached by Keras. '
+                'Runs on CPU via tensorflow-cpu already in requirements — '
+                'no extra packages needed.</div>',
                 unsafe_allow_html=True)
 
-            _ym_name = st.selectbox(
-                "YOLO model",
-                list(_YOLO_MODELS.keys()),
-                key="al_ym",
-                help="YOLOv4-tiny is fastest and works great for most use cases."
-            )
-            st.session_state.al_yolo_model = _ym_name
+            _img_mode = st.radio(
+                "Labeling mode",
+                ["ImageNet (1000 built-in classes)",
+                 "Custom labels (your own class names)"],
+                key="al_img_mode_sel",
+                help=("ImageNet: model directly predicts one of 1000 classes. "
+                      "Custom: you define labels, model matches via feature similarity."))
+            st.session_state.al_img_mode = (
+                "imagenet" if "ImageNet" in _img_mode else "custom")
 
-            _yconf = st.slider(
-                "Detection confidence threshold", 0.10, 0.95,
-                st.session_state.al_img_conf, 0.05, key="al_yconf"
-            )
-            st.session_state.al_img_conf = _yconf
+            _ec1, _ec2 = st.columns(2)
+            with _ec1:
+                _top_k = st.slider("Top-K predictions per image", 1, 10, 3, key="al_topk")
+                st.session_state.al_top_k = _top_k
+            with _ec2:
+                _conf_thresh = st.slider("Minimum confidence threshold",
+                                          0.05, 0.95, 0.35, 0.05, key="al_img_conf_sl")
+                st.session_state.al_img_conf = _conf_thresh
             st.markdown('</div>', unsafe_allow_html=True)
+
+            if st.session_state.al_img_mode == "custom":
+                st.markdown(
+                    '<div class="als-section">'
+                    '<div class="als-section-title">Custom Labels</div>',
+                    unsafe_allow_html=True)
+                st.caption(
+                    "Enter one label per line. For each label upload 1-5 reference images — "
+                    "MobileNetV2 extracts their features and matches new images by cosine similarity.")
+                _custom_raw = st.text_area(
+                    "Your labels (one per line)",
+                    placeholder="cat\ndog\ncar\nperson",
+                    height=100, key="al_custom_labels")
+                st.session_state.al_img_labels = [
+                    l.strip() for l in _custom_raw.splitlines() if l.strip()]
+
+                if st.session_state.al_img_labels:
+                    st.markdown("**Upload reference images per label (optional but improves accuracy):**")
+                    _ref_imgs = {}
+                    for _lbl in st.session_state.al_img_labels[:10]:  # max 10 labels
+                        _refs = st.file_uploader(
+                            f"References for '{_lbl}'",
+                            type=["jpg","jpeg","png","webp"],
+                            accept_multiple_files=True,
+                            key=f"al_ref_{_lbl}")
+                        if _refs:
+                            _ref_imgs[_lbl] = _refs
+                    st.session_state["al_ref_imgs"] = _ref_imgs
+                st.markdown('</div>', unsafe_allow_html=True)
 
             st.markdown(
                 '<div class="als-section">'
-                '<div class="als-section-title">Upload Images</div>',
+                '<div class="als-section-title">Upload Images to Label</div>',
                 unsafe_allow_html=True)
             _uploaded = st.file_uploader(
                 "Upload images (JPG, PNG, WEBP)",
-                type=["jpg", "jpeg", "png", "webp"],
-                accept_multiple_files=True,
-                key="al_img_up"
-            )
+                type=["jpg","jpeg","png","webp"],
+                accept_multiple_files=True, key="al_img_up")
             if _uploaded:
                 st.session_state.al_img_files = _uploaded
                 st.markdown(
-                    f'<span class="dm-badge green">{len(_uploaded)} image(s) uploaded</span>',
+                    f'<span class="dm-badge green">{len(_uploaded)} image(s) ready</span>',
                     unsafe_allow_html=True)
-                _prev_cols = st.columns(min(3, len(_uploaded)))
-                for _i, _img_f in enumerate(list(_uploaded)[:3]):
-                    _prev_cols[_i].image(_img_f, caption=_img_f.name, use_container_width=True)
-                if len(_uploaded) > 3:
-                    st.caption(f"...and {len(_uploaded) - 3} more images")
+                _prev_cols = st.columns(min(4, len(_uploaded)))
+                for _i, _f in enumerate(list(_uploaded)[:4]):
+                    _prev_cols[_i].image(_f, caption=_f.name, use_container_width=True)
+                if len(_uploaded) > 4:
+                    st.caption(f"...and {len(_uploaded)-4} more")
             st.markdown('</div>', unsafe_allow_html=True)
 
-            st.markdown(
-                '<div class="als-section">'
-                '<div class="als-section-title">Class Filter (optional)</div>',
-                unsafe_allow_html=True)
-            st.caption(f"Leave empty to detect all 80 COCO classes. "
-                       f"Available: {', '.join(_COCO_CLASSES[:10])}…")
-            _clf_raw = st.text_input(
-                "Filter to specific classes (comma-separated)",
-                placeholder="e.g. person, car, dog",
-                key="al_clf"
-            )
-            st.session_state.al_img_labels = (
-                [c.strip() for c in _clf_raw.split(",") if c.strip()]
-                if _clf_raw.strip() else []
-            )
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        # ── IMG TAB 2 DETECT ─────────────────────────────────────────────
+        # ── IMG TAB 2 CLASSIFY ───────────────────────────────────────────
         with _img_tab2:
             if not st.session_state.al_img_files:
                 st.markdown(
@@ -4235,77 +3973,139 @@ elif page == "🤖 Auto Labeling":
                     '<div style="font-size:.9rem">Upload images in the Setup tab first</div>'
                     '</div>', unsafe_allow_html=True)
             else:
-                _nim = len(st.session_state.al_img_files)
-                _mdl_info = _YOLO_MODELS[st.session_state.al_yolo_model]
+                _nim  = len(st.session_state.al_img_files)
+                _mode = st.session_state.al_img_mode
+                _topk = st.session_state.al_top_k
+                _cthr = st.session_state.al_img_conf
+
                 st.markdown(
                     f'<div style="background:#f0fdf4;border:1px solid #86efac;'
                     f'border-radius:10px;padding:.7rem 1rem;font-size:.8rem;'
                     f'color:#166534;margin-bottom:1rem;">'
-                    f'{_nim} image(s) ready &middot; '
-                    f'Model: <strong>{_mdl_info["key"]}</strong> &middot; '
-                    f'Confidence: <strong>{st.session_state.al_img_conf:.0%}</strong> &middot; '
-                    f'Input size: <strong>{_mdl_info["size"]}×{_mdl_info["size"]}</strong>'
+                    f'{_nim} image(s) &middot; '
+                    f'Mode: <strong>{"ImageNet 1000" if _mode=="imagenet" else "Custom labels"}</strong>'
+                    f' &middot; Top-K: <strong>{_topk}</strong>'
+                    f' &middot; Min confidence: <strong>{_cthr:.0%}</strong>'
                     f'</div>', unsafe_allow_html=True)
 
-                if st.button("Run Detection (Offline)", key="al_yrun",
+                if st.button("Run MobileNetV2 Classification", key="al_yrun",
                              use_container_width=True, type="primary"):
-                    try:
-                        import cv2 as _cv2
-                        _net = _load_yolo_net(_mdl_info)
-                        if _net is None:
-                            st.error("Failed to load model. Check your internet connection for the one-time download.")
-                        else:
-                            _results_list = []
-                            _prog = st.progress(0, "Starting detection...")
+                    _full_mdl, _feat_mdl = _get_mobilenet()
+                    if _full_mdl is None:
+                        st.error("Failed to load MobileNetV2. Check TensorFlow installation.")
+                    else:
+                        _results_list = []
+                        _prog = st.progress(0, "Classifying images...")
+                        try:
+                            # Build custom label embeddings if needed
+                            _label_embeddings = {}
+                            if _mode == "custom":
+                                _ref_imgs = st.session_state.get("al_ref_imgs", {})
+                                import numpy as _np2
+                                for _lbl in st.session_state.al_img_labels:
+                                    _refs = _ref_imgs.get(_lbl, [])
+                                    if _refs:
+                                        _feats = [_extract_features(_feat_mdl, r.read())
+                                                  for r in _refs]
+                                        _label_embeddings[_lbl] = _np2.mean(_feats, axis=0)
+                                    else:
+                                        # No reference images — use label name as proxy
+                                        # (zero vector means cosine sim will be 0)
+                                        _label_embeddings[_lbl] = _np2.zeros(1280)
+
                             for _ii, _img_file in enumerate(st.session_state.al_img_files):
+                                _img_bytes = _img_file.read()
                                 _prog.progress(
                                     _ii / _nim,
-                                    text=f"Detecting: {_img_file.name} ({_ii+1}/{_nim})"
+                                    text=f"Classifying: {_img_file.name} ({_ii+1}/{_nim})"
                                 )
-                                _img_bytes = _img_file.read()
-                                _boxes, _ann_bytes = _detect_objects(
-                                    _net, _img_bytes,
-                                    _mdl_info["size"],
-                                    st.session_state.al_img_conf,
-                                    st.session_state.al_img_labels,
-                                )
+
+                                if _mode == "imagenet":
+                                    _preds_raw = _imagenet_predict(_full_mdl, _img_bytes, _topk)
+                                    _boxes = [
+                                        {"class": cls, "confidence": round(sc, 4),
+                                         "x1": 0, "y1": 0, "x2": 0, "y2": 0}
+                                        for cls, sc in _preds_raw if sc >= _cthr
+                                    ]
+                                    _top_label = _preds_raw[0][0] if _preds_raw else "unknown"
+                                    _top_conf  = _preds_raw[0][1] if _preds_raw else 0.0
+
+                                else:  # custom labels via feature similarity
+                                    import numpy as _np2
+                                    _feat_vec = _extract_features(_feat_mdl, _img_bytes)
+                                    _sims = {
+                                        lbl: _cosine_sim(_feat_vec, emb)
+                                        for lbl, emb in _label_embeddings.items()
+                                    }
+                                    _sorted_sims = sorted(_sims.items(), key=lambda x: -x[1])
+                                    _boxes = [
+                                        {"class": cls, "confidence": round(sc, 4),
+                                         "x1": 0, "y1": 0, "x2": 0, "y2": 0}
+                                        for cls, sc in _sorted_sims[:_topk] if sc >= _cthr
+                                    ]
+                                    _top_label = _sorted_sims[0][0] if _sorted_sims else "unknown"
+                                    _top_conf  = _sorted_sims[0][1] if _sorted_sims else 0.0
+
+                                # Annotate image with top prediction text
+                                import cv2 as _cv2
+                                import numpy as _np2
+                                from PIL import Image as _PILImg
+                                import io as _imgio
+                                _pil = _PILImg.open(_imgio.BytesIO(_img_bytes)).convert("RGB")
+                                _arr = _np2.array(_pil)
+                                _ann = _cv2.cvtColor(_arr, _cv2.COLOR_RGB2BGR)
+                                _lbl_txt = f"{_top_label}  {_top_conf:.0%}"
+                                _cv2.rectangle(_ann, (0, 0), (_ann.shape[1], 36), (26,86,219), -1)
+                                _cv2.putText(_ann, _lbl_txt, (8, 25),
+                                             _cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                                             (255, 255, 255), 2)
+                                _ann_rgb = _cv2.cvtColor(_ann, _cv2.COLOR_BGR2RGB)
+                                _ann_pil = _PILImg.fromarray(_ann_rgb)
+                                _ann_buf = _imgio.BytesIO()
+                                _ann_pil.save(_ann_buf, format="PNG")
+
                                 _results_list.append({
                                     "filename":  _img_file.name,
                                     "boxes":     _boxes,
                                     "n_objects": len(_boxes),
-                                    "classes":   list(set(b["class"] for b in _boxes)),
+                                    "classes":   [b["class"] for b in _boxes],
+                                    "top_label": _top_label,
+                                    "top_conf":  round(_top_conf, 4),
                                     "img_bytes": _img_bytes,
-                                    "ann_bytes": _ann_bytes,
+                                    "ann_bytes": _ann_buf.getvalue(),
                                 })
                                 _prog.progress(
                                     (_ii + 1) / _nim,
-                                    text=f"Done: {_img_file.name} ({_ii+1}/{_nim})"
-                                )
+                                    text=f"Done: {_img_file.name} ({_ii+1}/{_nim})")
+
                             _prog.empty()
                             st.session_state.al_img_results = _results_list
-                            st.success(f"Detection complete on {_nim} image(s)!")
+                            st.success(f"Classification complete on {_nim} image(s)!")
 
-                    except ImportError:
-                        st.error("OpenCV (cv2) not found. Run: pip install opencv-python-headless")
-                    except Exception as _ye:
-                        st.error(f"Detection error: {_ye}")
-                        st.exception(_ye)
+                        except ImportError as _ie:
+                            st.error(f"Missing dependency: {_ie}. "
+                                     "Ensure tensorflow-cpu and opencv-python-headless are installed.")
+                        except Exception as _ye:
+                            st.error(f"Classification error: {_ye}")
+                            st.exception(_ye)
 
-                # ── Results display ───────────────────────────────────────
+                # ── Results display ──────────────────────────────────────
                 if st.session_state.al_img_results:
                     _res_list = st.session_state.al_img_results
-                    _tot_obj  = sum(r["n_objects"] for r in _res_list)
-                    _all_cls  = {}
+                    _tot_preds = sum(r["n_objects"] for r in _res_list)
+                    _all_cls   = {}
                     for _r in _res_list:
                         for _b in _r["boxes"]:
                             _all_cls[_b["class"]] = _all_cls.get(_b["class"], 0) + 1
+                    _avg_conf = (sum(r["top_conf"] for r in _res_list) / len(_res_list)
+                                 if _res_list else 0)
 
                     _ki1, _ki2, _ki3, _ki4 = st.columns(4)
                     for _col, _val, _lbl, _cls in [
-                        (_ki1, _nim,             "Images",         ""),
-                        (_ki2, _tot_obj,          "Objects Found",  "green"),
-                        (_ki3, len(_all_cls),     "Unique Classes", "purple"),
-                        (_ki4, f"{_tot_obj/_nim:.1f}" if _nim else 0, "Avg/Image", "gold"),
+                        (_ki1, _nim,                          "Images",       ""),
+                        (_ki2, _tot_preds,                    "Predictions",  "green"),
+                        (_ki3, len(_all_cls),                 "Unique Labels","purple"),
+                        (_ki4, f"{_avg_conf:.0%}",            "Avg Confidence","gold"),
                     ]:
                         _col.markdown(
                             f'<div class="als-stat">'
@@ -4319,10 +4119,10 @@ elif page == "🤖 Auto Labeling":
                         _clsc1, _clsc2 = st.columns([1, 2])
                         with _clsc1:
                             st.markdown('<div class="als-section-title" '
-                                        'style="color:#374151;font-size:.8rem;">Class Distribution</div>',
+                                        'style="color:#374151;font-size:.8rem;">Label Distribution</div>',
                                         unsafe_allow_html=True)
-                            _fgc, _axc = plt.subplots(figsize=(4, max(2.5, len(_all_cls) * 0.4)))
-                            _srt = dict(sorted(_all_cls.items(), key=lambda x: -x[1]))
+                            _srt = dict(sorted(_all_cls.items(), key=lambda x: -x[1])[:20])
+                            _fgc, _axc = plt.subplots(figsize=(4, max(2.5, len(_srt) * 0.35)))
                             _axc.barh(list(_srt.keys()), list(_srt.values()),
                                       color=C_BLUE, edgecolor="white")
                             _axc.set_xlabel("Count")
@@ -4331,26 +4131,29 @@ elif page == "🤖 Auto Labeling":
                             plt.close(_fgc)
                         with _clsc2:
                             st.markdown('<div class="als-section-title" '
-                                        'style="color:#374151;font-size:.8rem;">Summary</div>',
+                                        'style="color:#374151;font-size:.8rem;">Top Predictions</div>',
                                         unsafe_allow_html=True)
-                            st.dataframe(
-                                pd.DataFrame([
-                                    {"Class": k, "Count": v,
-                                     "Pct": f"{v * 100 // _tot_obj}%"}
-                                    for k, v in _srt.items()
-                                ]),
-                                use_container_width=True, hide_index=True)
+                            _summary_rows = [
+                                {"Image": r["filename"],
+                                 "Top Label": r["top_label"],
+                                 "Confidence": f"{r['top_conf']:.1%}",
+                                 "All Predictions": ", ".join(
+                                     f"{b['class']} ({b['confidence']:.0%})"
+                                     for b in r["boxes"][:3])}
+                                for r in _res_list
+                            ]
+                            st.dataframe(pd.DataFrame(_summary_rows),
+                                         use_container_width=True, hide_index=True)
 
                     st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
                     st.markdown('<div class="als-section-title" '
                                 'style="color:#374151;font-size:.8rem;margin-bottom:.75rem;">'
                                 'Per-Image Results</div>', unsafe_allow_html=True)
+
                     for _ri, _rr in enumerate(_res_list):
                         with st.expander(
-                            f"{_rr['filename']} — {_rr['n_objects']} objects"
-                            + (f" ({', '.join(_rr['classes'])})" if _rr['classes'] else " (none)"),
-                            expanded=(_ri == 0)
-                        ):
+                            f"{_rr['filename']} — {_rr['top_label']} ({_rr['top_conf']:.0%})",
+                            expanded=(_ri == 0)):
                             _rc1, _rc2 = st.columns(2)
                             with _rc1:
                                 st.markdown("**Original**")
@@ -4360,16 +4163,15 @@ elif page == "🤖 Auto Labeling":
                                 st.image(_rr["ann_bytes"], use_container_width=True)
                             if _rr["boxes"]:
                                 st.dataframe(
-                                    pd.DataFrame(_rr["boxes"])[
-                                        ["class", "confidence", "x1", "y1", "x2", "y2"]],
+                                    pd.DataFrame(_rr["boxes"])[["class", "confidence"]],
                                     use_container_width=True, hide_index=True)
                             else:
-                                st.caption("No objects detected in this image.")
+                                st.caption("No predictions above confidence threshold.")
 
         # ── IMG TAB 3 EXPORT ─────────────────────────────────────────────
         with _img_tab3:
             if not st.session_state.al_img_results:
-                st.info("Run detection first (Detect & Label tab).")
+                st.info("Run classification first (Classify & Label tab).")
             else:
                 _exp_list = st.session_state.al_img_results
                 _rows = []
@@ -4378,16 +4180,14 @@ elif page == "🤖 Auto Labeling":
                         for _bb in _rr["boxes"]:
                             _rows.append({
                                 "filename":   _rr["filename"],
-                                "class":      _bb["class"],
+                                "label":      _bb["class"],
                                 "confidence": _bb["confidence"],
-                                "x1": _bb["x1"], "y1": _bb["y1"],
-                                "x2": _bb["x2"], "y2": _bb["y2"],
                             })
                     else:
                         _rows.append({
-                            "filename": _rr["filename"], "class": "", "confidence": 0,
-                            "x1": 0, "y1": 0, "x2": 0, "y2": 0
-                        })
+                            "filename": _rr["filename"],
+                            "label": "no_prediction",
+                            "confidence": 0.0})
 
                 _df_exp = pd.DataFrame(_rows)
                 _ei1, _ei2, _ei3 = st.columns(3)
@@ -4396,12 +4196,12 @@ elif page == "🤖 Auto Labeling":
                     f'<div class="als-stat-lbl">Images</div></div>', unsafe_allow_html=True)
                 _ei2.markdown(
                     f'<div class="als-stat"><div class="als-stat-val green">'
-                    f'{sum(r["n_objects"] for r in _exp_list)}</div>'
-                    f'<div class="als-stat-lbl">Total Objects</div></div>', unsafe_allow_html=True)
+                    f'{len(_df_exp)}</div>'
+                    f'<div class="als-stat-lbl">Total Labels</div></div>', unsafe_allow_html=True)
                 _ei3.markdown(
                     f'<div class="als-stat"><div class="als-stat-val purple">'
-                    f'{_df_exp["class"].nunique()}</div>'
-                    f'<div class="als-stat-lbl">Classes</div></div>', unsafe_allow_html=True)
+                    f'{_df_exp["label"].nunique()}</div>'
+                    f'<div class="als-stat-lbl">Unique Classes</div></div>', unsafe_allow_html=True)
 
                 st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
                 st.download_button(
@@ -4411,19 +4211,6 @@ elif page == "🤖 Auto Labeling":
                     mime="text/csv", key="al_img_dl")
                 st.dataframe(_df_exp, use_container_width=True, hide_index=True)
 
-                st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
-                st.markdown("**YOLO .txt annotation format preview:**")
-                _yolo_txt = ""
-                for _rr in _exp_list[:2]:
-                    _yolo_txt += f"# {_rr['filename']}\n"
-                    for _bb in _rr["boxes"][:5]:
-                        _yolo_txt += (
-                            f"{_COCO_CLASSES.index(_bb['class']) if _bb['class'] in _COCO_CLASSES else 0} "
-                            f"{_bb['x1']} {_bb['y1']} "
-                            f"{_bb['x2']} {_bb['y2']} "
-                            f"{_bb['confidence']:.3f}\n"
-                        )
-                st.code(_yolo_txt, language="text")
 
 elif page == "🛡️ Admin Panel":
     # ── Only accessible if admin=True ────────────────────────────────────
