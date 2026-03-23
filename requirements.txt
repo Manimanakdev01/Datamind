@@ -1,71 +1,46 @@
 # ─────────────────────────────────────────────────────────────
-#  DataMind AI — requirements.txt
-#  Streamlit Cloud deployment
-#
-#  Install locally:   pip install -r requirements.txt
-#  Python version:    3.10 or 3.11  (recommended)
+#  DataMind AI — requirements.txt  (Streamlit Cloud)
 # ─────────────────────────────────────────────────────────────
 
-# ── Core app ─────────────────────────────────────────────────
-streamlit>=1.35.0
+# ── Core ─────────────────────────────────────────────────────
+streamlit>=1.32.0
 
-# ── Data & ML ────────────────────────────────────────────────
-numpy>=1.24.0
-pandas>=2.0.0
-scikit-learn>=1.4.0
-scipy>=1.11.0
+# ── Data ─────────────────────────────────────────────────────
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+scipy>=1.11.0,<2.0.0
+
+# ── ML ───────────────────────────────────────────────────────
+scikit-learn>=1.3.0,<2.0.0
 
 # ── Visualisation ────────────────────────────────────────────
 matplotlib>=3.7.0
-seaborn>=0.13.0
+seaborn>=0.12.0
 
 # ── Explainability ───────────────────────────────────────────
-shap>=0.44.0
+shap>=0.43.0
 
 # ── Deep Learning ────────────────────────────────────────────
-tensorflow>=2.15.0,<2.17.0
-tf-keras>=2.15.0
+# tensorflow-cpu is smaller (~400 MB) and identical API to tensorflow
+tensorflow-cpu>=2.13.0,<2.16.0
 
 # ── Computer Vision ──────────────────────────────────────────
-Pillow>=10.0.0
-ultralytics==8.3.23
+Pillow>=9.0.0,<11.0.0
 
 # ── Firebase ─────────────────────────────────────────────────
+# pyrebase4 has strict sub-deps — keep it unpinned so pip resolves freely
 pyrebase4>=4.7.1
-requests>=2.31.0
 
-# ── QR code generation ───────────────────────────────────────
-qrcode[pil]>=7.4.2
+# ── Networking ───────────────────────────────────────────────
+requests>=2.28.0,<3.0.0
+urllib3>=1.26.0,<3.0.0
 
-# ── PDF handling ─────────────────────────────────────────────
-pdfplumber>=0.10.0
+# ── QR code ──────────────────────────────────────────────────
+qrcode[pil]>=7.4.0
+
+# ── PDF ──────────────────────────────────────────────────────
+pdfplumber>=0.9.0
 PyPDF2>=3.0.0
 
-# ─────────────────────────────────────────────────────────────
-#  NOTES FOR STREAMLIT CLOUD
-# ─────────────────────────────────────────────────────────────
-#
-#  1. Python version — add a .python-version file in your repo root:
-#       echo "3.11" > .python-version
-#
-#  2. TensorFlow on Streamlit Cloud uses ~1 GB RAM.
-#     If you hit memory limits, replace the tensorflow lines above with:
-#       tensorflow-cpu>=2.15.0,<2.17.0
-#
-#  3. Ultralytics pulls in torch (~700 MB). If you don't use YOLO,
-#     comment out the ultralytics line to keep the slug small.
-#
-#  4. Firebase secrets — store in Streamlit Cloud > App settings > Secrets:
-#       [firebase]
-#       api_key      = "..."
-#       database_url = "..."
-#     Then read with st.secrets["firebase"]["api_key"] and update _FB_CONFIG.
-#
-#  5. Razorpay secrets — same approach:
-#       [razorpay]
-#       key_id     = "rzp_live_..."
-#       key_secret = "..."
-#     Then at the top of main.py:
-#       RAZORPAY_KEY_ID     = st.secrets["razorpay"]["key_id"]
-#       RAZORPAY_KEY_SECRET = st.secrets["razorpay"]["key_secret"]
-# ─────────────────────────────────────────────────────────────
+# ── Protobuf — pin to avoid pyrebase4 vs tensorflow clash ────
+protobuf>=3.20.0,<5.0.0
