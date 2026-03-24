@@ -242,7 +242,7 @@ for k,v in [("history",[]),("model",None),("features",[]),("train_df",None),
 for _k,_v in [
     ("auth_uid",""),("auth_email",""),("auth_plan","free"),
     ("auth_is_admin",False),("auth_proj_used",0),
-    ("auth_paid_until",None),("auth_page","login"),("auth_error",""),
+    ("auth_paid_until",None),("auth_page","intro"),("auth_error",""),
     ("auth_token",""),          # Firebase idToken — required for authenticated RTDB writes
     ("auth_refresh_token",""),   # Firebase refreshToken — used to get new idToken
     ("auth_token_uid",""),       # uid the current token belongs to
@@ -1019,7 +1019,7 @@ def _left_base(tagline, extra_html=""):
         + extra_html +
         '<div class="al-chips">'
         '<span class="al-chip">Free &middot; 2 Projects</span>'
-        '<span class="al-chip">Premium &middot; &#8377;300/mo</span>'
+        '<span class="al-chip">Premium &middot; &#8377;1000/mo</span>'
         '<span class="al-chip">Firebase Auth</span>'
         '<span class="al-chip">Realtime DB</span>'
         '</div>'
@@ -1038,6 +1038,298 @@ def _right_open():
 
 def _right_close():
     st.markdown('</div></div></div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════
+#  INTRO / LANDING PAGE
+# ══════════════════════════════════════════════════════════
+if st.session_state.auth_page == "intro":
+    st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body,[data-testid="stAppViewContainer"]{background:#050d1e!important;}
+[data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],footer{display:none!important;}
+section[data-testid="stSidebar"]{display:none!important;}
+.block-container{padding:0!important;max-width:100%!important;margin:0!important;}
+.intro-wrap{font-family:'IBM Plex Sans',sans-serif;background:#050d1e;color:#fff;min-height:100vh;}
+
+/* NAV */
+.intro-nav{display:flex;align-items:center;justify-content:space-between;
+  padding:1.1rem 3rem;border-bottom:1px solid rgba(255,255,255,.07);
+  background:rgba(5,13,30,.92);position:sticky;top:0;z-index:100;}
+.intro-nav-logo{font-size:1.3rem;font-weight:800;letter-spacing:-.02em;}
+.intro-nav-logo em{color:#60a5fa;font-style:normal;}
+.intro-nav-btns{display:flex;gap:.75rem;}
+.btn-ghost{padding:.45rem 1.2rem;border-radius:8px;font-size:.82rem;font-weight:600;
+  background:transparent;border:1.5px solid rgba(255,255,255,.25);color:#cbd5e1;cursor:pointer;
+  text-decoration:none;display:inline-block;}
+.btn-primary{padding:.45rem 1.4rem;border-radius:8px;font-size:.82rem;font-weight:700;
+  background:linear-gradient(135deg,#1a56db,#2563eb);border:none;color:#fff;cursor:pointer;
+  text-decoration:none;display:inline-block;box-shadow:0 4px 18px rgba(26,86,219,.4);}
+
+/* HERO */
+.intro-hero{text-align:center;padding:5rem 2rem 4rem;position:relative;overflow:hidden;}
+.intro-hero::before{content:"";position:absolute;width:700px;height:700px;border-radius:50%;
+  background:radial-gradient(circle,rgba(59,130,246,.18) 0%,transparent 65%);
+  top:-200px;left:50%;transform:translateX(-50%);pointer-events:none;}
+.intro-hero::after{content:"";position:absolute;width:400px;height:400px;border-radius:50%;
+  background:radial-gradient(circle,rgba(139,92,246,.14) 0%,transparent 65%);
+  bottom:-100px;right:10%;pointer-events:none;}
+.hero-badge{display:inline-flex;align-items:center;gap:.4rem;
+  background:rgba(26,86,219,.18);border:1px solid rgba(26,86,219,.4);
+  border-radius:20px;padding:.3rem .9rem;font-size:.7rem;font-weight:600;
+  color:#93c5fd;letter-spacing:.06em;text-transform:uppercase;margin-bottom:1.5rem;}
+.hero-h1{font-size:3.4rem;font-weight:800;line-height:1.12;letter-spacing:-.04em;
+  color:#f0f9ff;max-width:780px;margin:0 auto 1.2rem;}
+.hero-h1 em{color:#60a5fa;font-style:normal;
+  background:linear-gradient(90deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;}
+.hero-sub{font-size:1.05rem;color:#94a3b8;max-width:560px;margin:0 auto 2.5rem;line-height:1.65;}
+.hero-btns{display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;margin-bottom:3rem;}
+.hero-btn-main{padding:.85rem 2.4rem;border-radius:12px;font-size:.95rem;font-weight:700;
+  background:linear-gradient(135deg,#1a56db,#2563eb);border:none;color:#fff;cursor:pointer;
+  box-shadow:0 6px 28px rgba(26,86,219,.45);transition:all .18s;text-decoration:none;display:inline-block;}
+.hero-btn-sec{padding:.85rem 2.4rem;border-radius:12px;font-size:.95rem;font-weight:600;
+  background:rgba(255,255,255,.07);border:1.5px solid rgba(255,255,255,.2);color:#e2e8f0;
+  cursor:pointer;transition:all .18s;text-decoration:none;display:inline-block;}
+.hero-stats{display:flex;justify-content:center;gap:3rem;flex-wrap:wrap;
+  padding-top:2rem;border-top:1px solid rgba(255,255,255,.07);position:relative;z-index:1;}
+.hero-stat-val{font-family:'IBM Plex Mono',monospace;font-size:1.9rem;font-weight:700;color:#60a5fa;}
+.hero-stat-lbl{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-top:2px;}
+
+/* SECTION HEADINGS */
+.section{padding:4.5rem 2rem;}
+.section-tag{font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;
+  color:#60a5fa;letter-spacing:.12em;text-transform:uppercase;text-align:center;margin-bottom:.7rem;}
+.section-h2{font-size:2rem;font-weight:800;text-align:center;color:#f0f9ff;
+  letter-spacing:-.03em;margin-bottom:.6rem;}
+.section-sub{font-size:.88rem;color:#94a3b8;text-align:center;max-width:520px;
+  margin:0 auto 3rem;line-height:1.6;}
+
+/* FEATURES GRID */
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:1.2rem;max-width:1100px;margin:0 auto;}
+.feat-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);
+  border-radius:16px;padding:1.5rem 1.6rem;transition:all .2s;}
+.feat-card:hover{background:rgba(255,255,255,.07);border-color:rgba(96,165,250,.3);
+  transform:translateY(-2px);}
+.feat-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;
+  justify-content:center;font-size:1.1rem;margin-bottom:1rem;}
+.feat-icon.blue{background:rgba(59,130,246,.18);border:1px solid rgba(59,130,246,.25);}
+.feat-icon.purple{background:rgba(139,92,246,.18);border:1px solid rgba(139,92,246,.25);}
+.feat-icon.green{background:rgba(16,185,129,.18);border:1px solid rgba(16,185,129,.25);}
+.feat-icon.gold{background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.25);}
+.feat-icon.red{background:rgba(239,68,68,.18);border:1px solid rgba(239,68,68,.25);}
+.feat-icon.cyan{background:rgba(6,182,212,.18);border:1px solid rgba(6,182,212,.25);}
+.feat-title{font-size:.95rem;font-weight:700;color:#f0f9ff;margin-bottom:.4rem;}
+.feat-desc{font-size:.79rem;color:#94a3b8;line-height:1.55;}
+.feat-tag{display:inline-block;margin-top:.75rem;font-size:.63rem;font-weight:600;
+  padding:.18rem .6rem;border-radius:20px;background:rgba(26,86,219,.18);color:#93c5fd;
+  border:1px solid rgba(26,86,219,.3);}
+
+/* INDUSTRIES */
+.ind-section{background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);
+  border-bottom:1px solid rgba(255,255,255,.06);}
+.ind-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:1rem;max-width:1000px;margin:0 auto;}
+.ind-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+  border-radius:14px;padding:1.3rem 1.2rem;text-align:center;}
+.ind-emoji{font-size:1.8rem;margin-bottom:.6rem;}
+.ind-name{font-size:.88rem;font-weight:700;color:#e2e8f0;margin-bottom:.35rem;}
+.ind-use{font-size:.73rem;color:#94a3b8;line-height:1.5;}
+
+/* PREMIUM TABLE */
+.plan-wrap{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;
+  max-width:760px;margin:0 auto;}
+.plan-card{border-radius:20px;padding:2rem 1.8rem;}
+.plan-free{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);}
+.plan-premium{background:linear-gradient(145deg,rgba(26,86,219,.25),rgba(139,92,246,.2));
+  border:1px solid rgba(96,165,250,.35);}
+.plan-badge{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  margin-bottom:.9rem;display:inline-block;padding:.2rem .7rem;border-radius:20px;}
+.plan-badge.free{background:rgba(255,255,255,.1);color:#94a3b8;}
+.plan-badge.prem{background:rgba(96,165,250,.25);color:#93c5fd;}
+.plan-price{font-family:'IBM Plex Mono',monospace;font-size:2.4rem;font-weight:700;
+  color:#f0f9ff;margin-bottom:1.2rem;}
+.plan-price span{font-size:.8rem;font-weight:400;color:#94a3b8;}
+.plan-row{display:flex;align-items:flex-start;gap:.6rem;margin-bottom:.7rem;font-size:.8rem;}
+.plan-row .chk{margin-top:1px;flex-shrink:0;}
+.plan-row.yes .chk{color:#34d399;}
+.plan-row.no{opacity:.45;}
+.plan-row.no .chk{color:#6b7280;}
+.plan-row .txt{color:#cbd5e1;line-height:1.4;}
+.plan-cta{width:100%;margin-top:1.6rem;padding:.75rem;border-radius:10px;
+  font-size:.88rem;font-weight:700;cursor:pointer;border:none;}
+.plan-cta.free-cta{background:rgba(255,255,255,.09);color:#e2e8f0;}
+.plan-cta.prem-cta{background:linear-gradient(135deg,#1a56db,#2563eb);color:#fff;
+  box-shadow:0 6px 20px rgba(26,86,219,.4);}
+
+/* FOOTER */
+.intro-footer{text-align:center;padding:2rem;border-top:1px solid rgba(255,255,255,.07);
+  font-size:.72rem;color:#475569;}
+</style>
+<div class="intro-wrap">
+
+<!-- NAV -->
+<div class="intro-nav">
+  <div class="intro-nav-logo">&#9672; DataMind <em>AI</em></div>
+  <div class="intro-nav-btns">
+    <a class="btn-ghost" href="#" onclick="window.location.reload()">Sign In</a>
+    <a class="btn-primary" href="#" onclick="window.location.reload()">Get Started Free</a>
+  </div>
+</div>
+
+<!-- HERO -->
+<div class="intro-hero">
+  <div class="hero-badge">&#9889; Production-Ready AutoML Platform</div>
+  <h1 class="hero-h1">Train AI Models<br>Without <em>Writing Code</em></h1>
+  <p class="hero-sub">Upload your data, click train, get results. DataMind AI brings AutoML, Deep Learning, NLP, RAG, and Chatbot into one powerful platform.</p>
+  <div class="hero-btns">
+    <a class="hero-btn-main" id="hero-start">&#128640; Get Started Free</a>
+    <a class="hero-btn-sec" id="hero-login">Sign In</a>
+  </div>
+  <div class="hero-stats">
+    <div><div class="hero-stat-val">10+</div><div class="hero-stat-lbl">AI Modules</div></div>
+    <div><div class="hero-stat-val">15+</div><div class="hero-stat-lbl">ML Algorithms</div></div>
+    <div><div class="hero-stat-val">FAISS</div><div class="hero-stat-lbl">Vector Search</div></div>
+    <div><div class="hero-stat-val">Free</div><div class="hero-stat-lbl">To Start</div></div>
+  </div>
+</div>
+
+<!-- FEATURES -->
+<div class="section">
+  <div class="section-tag">&#127775; Core Features</div>
+  <div class="section-h2">Everything You Need to Build AI</div>
+  <div class="section-sub">From raw CSV to trained model in minutes — no data science degree required.</div>
+  <div class="feat-grid">
+    <div class="feat-card">
+      <div class="feat-icon blue">&#129302;</div>
+      <div class="feat-title">AutoML Engine</div>
+      <div class="feat-desc">Auto-selects and tunes the best model from 15+ algorithms including Random Forest, XGBoost, and Logistic Regression. One click to train, compare, and export.</div>
+      <div class="feat-tag">Classification &middot; Regression</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon purple">&#129504;</div>
+      <div class="feat-title">Deep Learning (CNN &middot; LSTM)</div>
+      <div class="feat-desc">Build and train TensorFlow image classifiers (CNN) and sequence models (LSTM) with a visual interface. No code needed — configure layers and hit train.</div>
+      <div class="feat-tag">TensorFlow &middot; Keras</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon green">&#128270;</div>
+      <div class="feat-title">RAG with FAISS</div>
+      <div class="feat-desc">Upload PDFs, CSVs, or docs and ask natural language questions. Powered by Facebook AI's FAISS vector index and sentence-transformers for semantic retrieval.</div>
+      <div class="feat-tag">FAISS &middot; Semantic Search</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon gold">&#128172;</div>
+      <div class="feat-title">Custom Chatbot Studio</div>
+      <div class="feat-desc">Upload any Q&amp;A or intent CSV and instantly train a chatbot. Deploy it right inside the app with a live chat interface and confidence scoring.</div>
+      <div class="feat-tag">NLP &middot; Intent Classification</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon cyan">&#128202;</div>
+      <div class="feat-title">NLP &amp; Text Classification</div>
+      <div class="feat-desc">Train text classifiers for sentiment analysis, spam detection, topic tagging and more. TF-IDF vectorization with Naive Bayes, SVM, and Logistic Regression.</div>
+      <div class="feat-tag">Sentiment &middot; Spam &middot; Topics</div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon red">&#128200;</div>
+      <div class="feat-title">SHAP Explainability</div>
+      <div class="feat-desc">Understand why your model makes every prediction. SHAP summary plots, force plots, and waterfall charts for full model transparency.</div>
+      <div class="feat-tag">XAI &middot; Interpretability</div>
+    </div>
+  </div>
+</div>
+
+<!-- INDUSTRIES -->
+<div class="section ind-section">
+  <div class="section-tag">&#127968; Industry Use Cases</div>
+  <div class="section-h2">Built for Every Industry</div>
+  <div class="section-sub">DataMind AI powers real decisions across healthcare, finance, retail, and more.</div>
+  <div class="ind-grid">
+    <div class="ind-card">
+      <div class="ind-emoji">&#127973;</div>
+      <div class="ind-name">Healthcare</div>
+      <div class="ind-use">Disease prediction &middot; Patient risk scoring &middot; Medical report Q&amp;A with RAG</div>
+    </div>
+    <div class="ind-card">
+      <div class="ind-emoji">&#128178;</div>
+      <div class="ind-name">Finance</div>
+      <div class="ind-use">Fraud detection &middot; Credit scoring &middot; Loan default prediction</div>
+    </div>
+    <div class="ind-card">
+      <div class="ind-emoji">&#128722;</div>
+      <div class="ind-name">Retail &amp; E-commerce</div>
+      <div class="ind-use">Churn prediction &middot; Product recommendation &middot; Demand forecasting</div>
+    </div>
+    <div class="ind-card">
+      <div class="ind-emoji">&#127979;</div>
+      <div class="ind-name">Education</div>
+      <div class="ind-use">Student performance prediction &middot; Custom FAQ chatbot &middot; Document search</div>
+    </div>
+    <div class="ind-card">
+      <div class="ind-emoji">&#129302;</div>
+      <div class="ind-name">Manufacturing</div>
+      <div class="ind-use">Predictive maintenance &middot; Quality defect detection &middot; Sensor anomaly detection</div>
+    </div>
+  </div>
+</div>
+
+<!-- PRICING -->
+<div class="section">
+  <div class="section-tag">&#128176; Pricing</div>
+  <div class="section-h2">Start Free. Upgrade When Ready.</div>
+  <div class="section-sub">No credit card needed to start. Upgrade to Premium for unlimited power.</div>
+  <div class="plan-wrap">
+    <div class="plan-card plan-free">
+      <div class="plan-badge free">Free</div>
+      <div class="plan-price">&#8377;0 <span>/ forever</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">2 projects</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">AutoML (all algorithms)</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Data analysis &amp; EDA</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">SHAP explainability</span></div>
+      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Deep Learning (CNN/LSTM)</span></div>
+      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">RAG / Document Q&amp;A</span></div>
+      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Chatbot Studio</span></div>
+      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">NLP Text Classification</span></div>
+      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Clustering &amp; Auto Labeling</span></div>
+    </div>
+    <div class="plan-card plan-premium">
+      <div class="plan-badge prem">&#11088; Premium</div>
+      <div class="plan-price">&#8377;1000 <span>/ month</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Unlimited projects</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Everything in Free</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Deep Learning (CNN/LSTM)</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">RAG with FAISS semantic search</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Chatbot Studio</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">NLP Text Classification</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Clustering &amp; Auto Labeling</span></div>
+      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Priority support</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="intro-footer">
+  &#9672; DataMind AI v5.0 &middot; Production AutoML Platform &middot; Built with &#10084; for data scientists
+</div>
+
+</div>
+""", unsafe_allow_html=True)
+
+    # Streamlit buttons overlaid for navigation
+    _ib1, _ib2, _ib3 = st.columns([1, 1, 1])
+    with _ib1:
+        if st.button("&#128640; Get Started Free", key="intro_signup", use_container_width=True):
+            st.session_state.auth_page = "signup"; st.rerun()
+    with _ib2:
+        if st.button("Sign In", key="intro_login", use_container_width=True):
+            st.session_state.auth_page = "login"; st.rerun()
+    with _ib3:
+        if st.button("View Pricing &#8593;", key="intro_pricing", use_container_width=True):
+            st.session_state.auth_page = "signup"; st.rerun()
+    st.stop()
 
 
 if st.session_state.auth_page == "login":
@@ -1070,8 +1362,7 @@ if st.session_state.auth_page == "login":
             st.session_state.auth_page="signup"; st.session_state.auth_error=""; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="ac-foot">Free plan &middot; 2 projects &middot;'
-            ' No credit card needed</div>', unsafe_allow_html=True)
+            '<div class="ac-foot">Free plan &middot; 2 projects &middot; No credit card needed</div>', unsafe_allow_html=True)
         _right_close()
     st.stop()
 
