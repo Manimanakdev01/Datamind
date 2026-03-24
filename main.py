@@ -1621,72 +1621,680 @@ with st.sidebar:
 #  PAGE: ANALYSIS
 # ══════════════════════════════════════════════════════════
 if page=="📊 Analysis":
-    st.markdown("""<div class="dm-pagehead"><div class="icon">◈</div>
+    from scipy import stats as _sp_stats
+    import warnings as _warn
+
+    st.markdown("""<div class="dm-pagehead"><div class="icon">📊</div>
     <div><div class="title">Data Analysis</div>
-    <div class="sub">Explore distributions, correlations and data quality</div></div></div>""",
+    <div class="sub">EDA · Distributions · Correlations · Outliers · Statistical Tests · Time Series · Report</div></div></div>""",
     unsafe_allow_html=True)
 
-    uploaded=st.file_uploader("Upload CSV dataset",type=["csv"])
+    uploaded = st.file_uploader("Upload CSV dataset", type=["csv"])
     if not uploaded:
-        st.markdown('<div class="dm-upload"><div class="uicon">⬆</div><div class="hint">Drop a CSV file to begin</div></div>',unsafe_allow_html=True)
+        st.markdown('<div class="dm-upload"><div class="uicon">📊</div>' \
+                    '<div class="hint">Drop a CSV file to begin deep analysis</div></div>',
+                    unsafe_allow_html=True)
         st.stop()
 
-    fb=uploaded.read(); df_raw=load_csv(fb)
+    fb = uploaded.read()
+    df_raw = load_csv(fb)
 
-    c1,c2,c3,c4=st.columns(4)
-    miss_total=int(df_raw.isnull().sum().sum())
-    for col,val,lbl,cls in [
-        (c1,f"{df_raw.shape[0]:,}","Rows",""),
-        (c2,str(df_raw.shape[1]),"Columns","gold"),
-        (c3,str(miss_total),"Missing values","red" if miss_total>0 else "green"),
-        (c4,str(df_raw.select_dtypes(include=np.number).shape[1]),"Numeric cols","")]:
-        col.markdown(f'<div class="dm-kpi {cls}"><div class="val">{val}</div><div class="lbl">{lbl}</div></div>',unsafe_allow_html=True)
+    num_cols = df_raw.select_dtypes(include=np.number).columns.tolist()
+    cat_cols = df_raw.select_dtypes(include=["object","category"]).columns.tolist()
+    miss_total = int(df_raw.isnull().sum().sum())
+    dup_total  = int(df_raw.duplicated().sum())
 
-    t1,t2,t3,t4=st.tabs(["Overview","Distributions","Correlation","Missing"])
+    # ── KPI banner ──────────────────────────────────────
+    k1,k2,k3,k4,k5,k6 = st.columns(6)
+    for _col,_val,_lbl,_cls in [
+        (k1, f"{df_raw.shape[0]:,}", "Rows", ""),
+        (k2, str(df_raw.shape[1]), "Columns", "gold"),
+        (k3, str(len(num_cols)), "Numeric", "blue"),
+        (k4, str(len(cat_cols)), "Categorical", ""),
+        (k5, str(miss_total), "Missing", "red" if miss_total>0 else "green"),
+        (k6, str(dup_total),  "Duplicates", "red" if dup_total>0 else "green"),
+    ]:
+        _col.markdown(f'<div class="dm-kpi {_cls}"><div class="val" style="font-size:1.3rem">{_val}</div>' \
+                      f'<div class="lbl">{_lbl}</div></div>', unsafe_allow_html=True)
 
-    with t1:
-        st.markdown('<div class="dm-card"><div class="dm-card-title">Sample rows</div>',unsafe_allow_html=True)
-        st.dataframe(df_raw.head(20),use_container_width=True)
-        st.markdown('</div>',unsafe_allow_html=True)
-        st.markdown('<div class="dm-card"><div class="dm-card-title">Summary statistics</div>',unsafe_allow_html=True)
-        st.dataframe(df_raw.describe().T.style.background_gradient(cmap="Blues"),use_container_width=True)
-        st.markdown('</div>',unsafe_allow_html=True)
+    # ── TABS ────────────────────────────────────────────
+    (t_ov, t_dist, t_cat, t_corr, t_out,
+     t_miss, t_test, t_ts, t_pair, t_rep) = st.tabs([
+        "🗂 Overview", "📈 Distributions", "🏷 Categorical",
+        "🔗 Correlation", "🚨 Outliers", "❓ Missing Data",
+        "🧪 Statistical Tests", "📅 Time Series",
+        "🔵 Pairplot", "📄 Report"
+    ])
 
-    with t2:
-        num_cols=df_raw.select_dtypes(include=np.number).columns.tolist()
-        if num_cols:
-            col_sel=st.selectbox("Select column",num_cols)
-            fig,axes=plt.subplots(1,2,figsize=(10,3.5))
-            axes[0].hist(df_raw[col_sel].dropna(),bins=30,color=C_BLUE,edgecolor="white",alpha=0.85,linewidth=0.5)
-            axes[0].set_title(f"{col_sel} — Histogram")
-            axes[1].boxplot(df_raw[col_sel].dropna(),patch_artist=True,
-                            boxprops=dict(facecolor="#dbeafe",color=C_BLUE),
-                            whiskerprops=dict(color=C_SLATE),capprops=dict(color=C_SLATE),
-                            medianprops=dict(color=C_GOLD,linewidth=2))
-            axes[1].set_title(f"{col_sel} — Boxplot")
-            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+    # ════════════════════════════════════════════════════
+    #  TAB 1 — OVERVIEW
+    # ════════════════════════════════════════════════════
+    with t_ov:
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Data Preview</div>', unsafe_allow_html=True)
+        n_rows = st.slider("Rows to display", 5, 100, 20, key="ov_rows")
+        st.dataframe(df_raw.head(n_rows), use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    with t3:
-        @st.cache_data(show_spinner=False)
-        def _corr(b): return load_csv(b).select_dtypes(include=np.number).corr()
-        corr=_corr(fb)
-        fig,ax=plt.subplots(figsize=(max(6,len(corr)*0.6),max(5,len(corr)*0.55)))
-        sns.heatmap(corr,mask=np.triu(np.ones_like(corr,dtype=bool)),annot=True,fmt=".2f",
-                    cmap="RdBu_r",center=0,linewidths=0.4,linecolor="#e2e6ea",ax=ax,
-                    cbar_kws={"shrink":0.8},annot_kws={"size":8})
-        ax.set_title("Feature Correlation Matrix"); fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Column Info</div>', unsafe_allow_html=True)
+        _info_df = pd.DataFrame({
+            "Column":    df_raw.columns,
+            "DType":     df_raw.dtypes.astype(str).values,
+            "Non-Null":  df_raw.notnull().sum().values,
+            "Null":      df_raw.isnull().sum().values,
+            "Null %":    (df_raw.isnull().mean()*100).round(2).values,
+            "Unique":    df_raw.nunique().values,
+            "Sample":    [str(df_raw[c].dropna().iloc[0]) if df_raw[c].notnull().any() else "" for c in df_raw.columns],
+        })
+        st.dataframe(_info_df, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    with t4:
-        miss=df_raw.isnull().sum().sort_values(ascending=False); miss=miss[miss>0]
-        if miss.empty: st.success("✅ No missing values — dataset is complete.")
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Summary Statistics</div>', unsafe_allow_html=True)
+        _desc = df_raw.describe(include="all").T.reset_index().rename(columns={"index":"Column"})
+        st.dataframe(_desc.style.background_gradient(cmap="Blues", subset=[c for c in _desc.columns if c not in ["Column","top","freq"]]),
+                     use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if dup_total > 0:
+            st.warning(f"⚠️ {dup_total} duplicate rows found.")
+            if st.button("👁 Show duplicates", key="show_dups"):
+                st.dataframe(df_raw[df_raw.duplicated(keep=False)].head(50), use_container_width=True)
+
+        # Memory usage
+        _mem = df_raw.memory_usage(deep=True).sum() / 1024**2
+        st.markdown(f'<span class="dm-badge blue">💾 Memory usage: {_mem:.2f} MB</span>',
+                    unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 2 — DISTRIBUTIONS
+    # ════════════════════════════════════════════════════
+    with t_dist:
+        if not num_cols:
+            st.info("No numeric columns found.")
         else:
-            fig,ax=plt.subplots(figsize=(8,max(3,len(miss)*0.42)))
-            bars=ax.barh(miss.index,miss.values,color=C_RED,alpha=0.8,edgecolor="white")
-            ax.bar_label(bars,padding=4,fontsize=8,color=C_SLATE)
-            ax.set_xlabel("Missing count"); ax.set_title("Missing Values by Column")
-            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+            _d1, _d2, _d3 = st.columns(3)
+            with _d1: col_sel = st.selectbox("Column", num_cols, key="dist_col")
+            with _d2: dist_bins = st.slider("Bins", 5, 100, 30, key="dist_bins")
+            with _d3: show_kde  = st.checkbox("Show KDE", value=True, key="dist_kde")
 
-# ══════════════════════════════════════════════════════════
+            _series = df_raw[col_sel].dropna()
+
+            # Stats panel
+            _sk = float(_series.skew())
+            _ku = float(_series.kurtosis())
+            _s1,_s2,_s3,_s4,_s5,_s6 = st.columns(6)
+            for _sc,_sv,_sl in [
+                (_s1,f"{_series.mean():.4f}","Mean"),
+                (_s2,f"{_series.median():.4f}","Median"),
+                (_s3,f"{_series.std():.4f}","Std Dev"),
+                (_s4,f"{_sk:.3f}","Skewness"),
+                (_s5,f"{_ku:.3f}","Kurtosis"),
+                (_s6,f"{_series.quantile(.25):.3f} / {_series.quantile(.75):.3f}","Q1 / Q3"),
+            ]:
+                _sc.markdown(f'<div class="dm-kpi"><div class="val" style="font-size:1rem">{_sv}</div>' \
+                             f'<div class="lbl">{_sl}</div></div>', unsafe_allow_html=True)
+
+            if abs(_sk) > 1:
+                st.warning(f"⚠️ Column **{col_sel}** is {'right' if _sk>0 else 'left'}-skewed (skewness={_sk:.2f}). Consider log-transform.")
+
+            fig_d, axes_d = plt.subplots(1, 3, figsize=(14, 3.8))
+
+            # Histogram + KDE
+            axes_d[0].hist(_series, bins=dist_bins, color=C_BLUE, edgecolor="white", alpha=0.82, density=show_kde)
+            if show_kde:
+                from scipy.stats import gaussian_kde as _gkde
+                _kd = _gkde(_series)
+                _xs = np.linspace(_series.min(), _series.max(), 200)
+                axes_d[0].plot(_xs, _kd(_xs), color=C_RED, linewidth=2, label="KDE")
+                axes_d[0].legend(fontsize=8)
+            axes_d[0].set_title(f"{col_sel} — Histogram")
+
+            # Boxplot
+            axes_d[1].boxplot(_series, patch_artist=True,
+                              boxprops=dict(facecolor="#dbeafe", color=C_BLUE),
+                              whiskerprops=dict(color=C_SLATE), capprops=dict(color=C_SLATE),
+                              medianprops=dict(color=C_GOLD, linewidth=2),
+                              flierprops=dict(marker="o", markerfacecolor=C_RED, markersize=4, alpha=0.5))
+            axes_d[1].set_title(f"{col_sel} — Boxplot")
+
+            # Q-Q Plot
+            (_osm, _osr), (_slope, _intercept, _r) = _sp_stats.probplot(_series, dist="norm")
+            axes_d[2].plot(_osm, _osr, "o", color=C_BLUE, markersize=3, alpha=0.6)
+            axes_d[2].plot(_osm, np.array(_osm)*_slope+_intercept, color=C_RED, linewidth=2)
+            axes_d[2].set_title(f"{col_sel} — Q-Q Plot (Normal)")
+            axes_d[2].set_xlabel("Theoretical Quantiles"); axes_d[2].set_ylabel("Sample Quantiles")
+
+            fig_d.tight_layout(); st.pyplot(fig_d); plt.close(fig_d)
+
+            # Multi-column distribution grid
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**All numeric columns — distribution grid:**")
+            _grid_cols = num_cols[:16]
+            _gc = 4
+            _gr = (len(_grid_cols)-1)//_gc + 1
+            fig_grid, axes_grid = plt.subplots(_gr, _gc, figsize=(14, _gr*2.8))
+            axes_grid = np.array(axes_grid).flatten()
+            for _gi, _gcol in enumerate(_grid_cols):
+                _s = df_raw[_gcol].dropna()
+                axes_grid[_gi].hist(_s, bins=25, color=C_BLUE, edgecolor="white", alpha=0.8)
+                axes_grid[_gi].set_title(_gcol, fontsize=8, fontweight="600")
+                axes_grid[_gi].tick_params(labelsize=6)
+            for _gi in range(len(_grid_cols), len(axes_grid)):
+                axes_grid[_gi].set_visible(False)
+            fig_grid.tight_layout(); st.pyplot(fig_grid); plt.close(fig_grid)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 3 — CATEGORICAL
+    # ════════════════════════════════════════════════════
+    with t_cat:
+        if not cat_cols:
+            st.info("No categorical columns found.")
+        else:
+            _cat_sel = st.selectbox("Categorical column", cat_cols, key="cat_col")
+            _vc = df_raw[_cat_sel].value_counts().head(30)
+            _ca1, _ca2 = st.columns([1,1])
+
+            with _ca1:
+                # Bar chart
+                fig_ca, ax_ca = plt.subplots(figsize=(6, max(3, len(_vc)*0.38)))
+                _colors_ca = [C_BLUE if i==0 else "#93c5fd" for i in range(len(_vc))]
+                bars_ca = ax_ca.barh(_vc.index[::-1], _vc.values[::-1], color=_colors_ca[::-1], edgecolor="white")
+                ax_ca.bar_label(bars_ca, padding=3, fontsize=8)
+                ax_ca.set_title(f"{_cat_sel} — Value Counts (top 30)")
+                fig_ca.tight_layout(); st.pyplot(fig_ca); plt.close(fig_ca)
+
+            with _ca2:
+                # Pie chart
+                _pie_data = _vc.head(8)
+                fig_pi, ax_pi = plt.subplots(figsize=(5, 5))
+                _wedge_colors = [C_BLUE, C_GOLD, C_GREEN, C_RED, C_PURPLE, C_SLATE, "#06b6d4", "#f97316"]
+                ax_pi.pie(_pie_data.values, labels=_pie_data.index,
+                          colors=_wedge_colors[:len(_pie_data)],
+                          autopct="%1.1f%%", startangle=90,
+                          wedgeprops=dict(edgecolor="white", linewidth=1.5),
+                          textprops=dict(fontsize=8))
+                ax_pi.set_title(f"{_cat_sel} — Distribution (top 8)")
+                fig_pi.tight_layout(); st.pyplot(fig_pi); plt.close(fig_pi)
+
+            st.dataframe(_vc.reset_index().rename(columns={"index":_cat_sel,"count":"Count",_cat_sel:"Value"}),
+                         use_container_width=True)
+
+            # Cross-tab with another column
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Cross-tabulation:**")
+            _other_cats = [c for c in cat_cols if c != _cat_sel]
+            if _other_cats:
+                _cross_col = st.selectbox("Cross with", _other_cats, key="cross_col")
+                _ct = pd.crosstab(df_raw[_cat_sel], df_raw[_cross_col])
+                st.dataframe(_ct, use_container_width=True)
+                fig_ct, ax_ct = plt.subplots(figsize=(max(6, _ct.shape[1]*1.2), max(3, _ct.shape[0]*0.5)))
+                _ct.plot(kind="bar", ax=ax_ct, edgecolor="white", alpha=0.85)
+                ax_ct.set_title(f"{_cat_sel} × {_cross_col}")
+                plt.xticks(rotation=30, ha="right"); ax_ct.legend(fontsize=8)
+                fig_ct.tight_layout(); st.pyplot(fig_ct); plt.close(fig_ct)
+
+            # Numeric breakdown by category
+            if num_cols:
+                st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+                st.markdown("**Numeric column breakdown by category:**")
+                _num_by_cat = st.selectbox("Numeric column", num_cols, key="num_by_cat")
+                _grp = df_raw.groupby(_cat_sel)[_num_by_cat].describe().round(3)
+                st.dataframe(_grp, use_container_width=True)
+                fig_box2, ax_box2 = plt.subplots(figsize=(max(6, df_raw[_cat_sel].nunique()*0.7), 4))
+                _cats_sorted = df_raw[_cat_sel].value_counts().head(15).index.tolist()
+                _box_data = [df_raw[df_raw[_cat_sel]==c][_num_by_cat].dropna().values for c in _cats_sorted]
+                ax_box2.boxplot(_box_data, labels=_cats_sorted, patch_artist=True,
+                                boxprops=dict(facecolor="#dbeafe", color=C_BLUE),
+                                medianprops=dict(color=C_GOLD, linewidth=2))
+                ax_box2.set_title(f"{_num_by_cat} by {_cat_sel}")
+                plt.xticks(rotation=30, ha="right")
+                fig_box2.tight_layout(); st.pyplot(fig_box2); plt.close(fig_box2)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 4 — CORRELATION
+    # ════════════════════════════════════════════════════
+    with t_corr:
+        if len(num_cols) < 2:
+            st.info("Need at least 2 numeric columns.")
+        else:
+            _cr1, _cr2, _cr3 = st.columns(3)
+            with _cr1: _corr_method = st.selectbox("Method", ["pearson","spearman","kendall"], key="corr_meth")
+            with _cr2: _corr_thresh = st.slider("Highlight |corr| ≥", 0.0, 1.0, 0.7, 0.05, key="corr_thr")
+            with _cr3: _corr_mask   = st.checkbox("Mask upper triangle", value=True, key="corr_mask")
+
+            @st.cache_data(show_spinner=False)
+            def _corr_cached(b, method): return load_csv(b).select_dtypes(include=np.number).corr(method=method)
+            corr = _corr_cached(fb, _corr_method)
+
+            fig_cr, ax_cr = plt.subplots(figsize=(max(6,len(corr)*0.65), max(5,len(corr)*0.6)))
+            _mask = np.triu(np.ones_like(corr, dtype=bool)) if _corr_mask else None
+            sns.heatmap(corr, mask=_mask, annot=True, fmt=".2f", cmap="RdBu_r", center=0,
+                        linewidths=0.4, linecolor="#e2e6ea", ax=ax_cr,
+                        cbar_kws={"shrink":0.8}, annot_kws={"size":8},
+                        vmin=-1, vmax=1)
+            ax_cr.set_title(f"Correlation Matrix ({_corr_method.capitalize()})")
+            fig_cr.tight_layout(); st.pyplot(fig_cr); plt.close(fig_cr)
+
+            # Highly correlated pairs
+            st.markdown(f"**Pairs with |correlation| ≥ {_corr_thresh}:**")
+            _pairs = []
+            for i in range(len(corr.columns)):
+                for j in range(i+1, len(corr.columns)):
+                    _v = corr.iloc[i,j]
+                    if abs(_v) >= _corr_thresh:
+                        _pairs.append({"Feature A": corr.columns[i], "Feature B": corr.columns[j],
+                                       "Correlation": round(_v,4),
+                                       "Strength": "Strong" if abs(_v)>=0.9 else "Moderate"})
+            if _pairs:
+                st.dataframe(pd.DataFrame(_pairs).sort_values("Correlation",key=abs,ascending=False),
+                             use_container_width=True)
+                if any(abs(p["Correlation"])>=0.95 for p in _pairs):
+                    st.warning("⚠️ Near-perfect correlation detected — possible multicollinearity or duplicate features.")
+            else:
+                st.success(f"✅ No pairs with |corr| ≥ {_corr_thresh}")
+
+            # Scatter for selected pair
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Scatter plot for a feature pair:**")
+            _scx = st.selectbox("X-axis", num_cols, key="sc_x")
+            _scy = st.selectbox("Y-axis", [c for c in num_cols if c!=_scx], key="sc_y")
+            _hue_col = st.selectbox("Color by (optional)", ["none"]+cat_cols, key="sc_hue")
+            fig_sc, ax_sc = plt.subplots(figsize=(7,4))
+            if _hue_col=="none":
+                ax_sc.scatter(df_raw[_scx], df_raw[_scy], alpha=0.45, color=C_BLUE, s=18)
+            else:
+                _cats_u = df_raw[_hue_col].value_counts().head(8).index
+                _pal = [C_BLUE,C_GOLD,C_GREEN,C_RED,C_PURPLE,C_SLATE,"#06b6d4","#f97316"]
+                for _ci, _cv in enumerate(_cats_u):
+                    _m = df_raw[_hue_col]==_cv
+                    ax_sc.scatter(df_raw.loc[_m,_scx], df_raw.loc[_m,_scy],
+                                  alpha=0.55, color=_pal[_ci%len(_pal)], s=18, label=str(_cv))
+                ax_sc.legend(fontsize=8, markerscale=1.5)
+            # Trend line
+            _valid = df_raw[[_scx,_scy]].dropna()
+            if len(_valid)>2:
+                _z = np.polyfit(_valid[_scx], _valid[_scy], 1)
+                _xr= np.linspace(_valid[_scx].min(), _valid[_scx].max(), 100)
+                ax_sc.plot(_xr, np.polyval(_z,_xr), color=C_RED, linewidth=1.5, linestyle="--", label="Trend")
+            ax_sc.set_xlabel(_scx); ax_sc.set_ylabel(_scy)
+            ax_sc.set_title(f"{_scx} vs {_scy}  (r={corr.loc[_scx,_scy]:.3f})" if _scx in corr and _scy in corr else f"{_scx} vs {_scy}")
+            fig_sc.tight_layout(); st.pyplot(fig_sc); plt.close(fig_sc)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 5 — OUTLIERS
+    # ════════════════════════════════════════════════════
+    with t_out:
+        if not num_cols:
+            st.info("No numeric columns.")
+        else:
+            _ot1, _ot2 = st.columns(2)
+            with _ot1: _out_col = st.selectbox("Column", num_cols, key="out_col")
+            with _ot2: _out_meth = st.selectbox("Detection method", ["IQR (Tukey)","Z-Score","Modified Z-Score"], key="out_meth")
+            _out_s = df_raw[_out_col].dropna()
+
+            if _out_meth == "IQR (Tukey)":
+                _q1, _q3 = _out_s.quantile(0.25), _out_s.quantile(0.75)
+                _iqr = _q3 - _q1
+                _k = st.slider("IQR multiplier", 1.0, 3.0, 1.5, 0.1, key="iqr_k")
+                _lo, _hi = _q1 - _k*_iqr, _q3 + _k*_iqr
+                _out_mask = (_out_s < _lo) | (_out_s > _hi)
+                _method_label = f"IQR×{_k}"
+            elif _out_meth == "Z-Score":
+                _thresh = st.slider("Z-score threshold", 1.5, 5.0, 3.0, 0.1, key="z_thresh")
+                _zs = np.abs(_sp_stats.zscore(_out_s))
+                _out_mask = _zs > _thresh
+                _lo = _hi = None
+                _method_label = f"Z>{_thresh}"
+            else:  # Modified Z-Score
+                _thresh = st.slider("Modified Z threshold", 1.5, 5.0, 3.5, 0.1, key="mz_thresh")
+                _med = np.median(_out_s); _mad = np.median(np.abs(_out_s - _med))
+                _mzs = 0.6745*(_out_s - _med)/_mad if _mad>0 else pd.Series(np.zeros(len(_out_s)), index=_out_s.index)
+                _out_mask = np.abs(_mzs) > _thresh
+                _lo = _hi = None
+                _method_label = f"Mod-Z>{_thresh}"
+
+            _n_out = int(_out_mask.sum())
+            _out_pct = _n_out/len(_out_s)*100
+
+            _om1,_om2,_om3 = st.columns(3)
+            _om1.markdown(f'<div class="dm-kpi red"><div class="val">{_n_out}</div><div class="lbl">Outliers found</div></div>', unsafe_allow_html=True)
+            _om2.markdown(f'<div class="dm-kpi"><div class="val">{_out_pct:.2f}%</div><div class="lbl">of column</div></div>', unsafe_allow_html=True)
+            _om3.markdown(f'<div class="dm-kpi gold"><div class="val">{_method_label}</div><div class="lbl">Method</div></div>', unsafe_allow_html=True)
+
+            fig_ot, (ax_ot1, ax_ot2) = plt.subplots(1,2,figsize=(12,4))
+            # Scatter with outliers
+            _idx = np.arange(len(_out_s))
+            ax_ot1.scatter(_idx[~_out_mask], _out_s[~_out_mask], color=C_BLUE, s=8, alpha=0.5, label="Normal")
+            ax_ot1.scatter(_idx[_out_mask],  _out_s[_out_mask],  color=C_RED,  s=20,alpha=0.8, label=f"Outlier ({_n_out})", zorder=5)
+            if _lo is not None:
+                ax_ot1.axhline(_lo, color=C_GOLD, linestyle="--", linewidth=1.2, label=f"Lower ({_lo:.2f})")
+                ax_ot1.axhline(_hi, color=C_GOLD, linestyle="--", linewidth=1.2, label=f"Upper ({_hi:.2f})")
+            ax_ot1.set_title(f"{_out_col} — Outlier Detection ({_method_label})")
+            ax_ot1.legend(fontsize=8)
+            # Box + strip
+            ax_ot2.boxplot(_out_s, patch_artist=True,
+                           boxprops=dict(facecolor="#dbeafe",color=C_BLUE),
+                           medianprops=dict(color=C_GOLD,linewidth=2),
+                           flierprops=dict(marker="o",markerfacecolor=C_RED,markersize=5,alpha=0.6))
+            ax_ot2.set_title(f"{_out_col} — Box & Whisker")
+            fig_ot.tight_layout(); st.pyplot(fig_ot); plt.close(fig_ot)
+
+            if _n_out > 0:
+                with st.expander(f"👁 View {min(_n_out,100)} outlier rows"):
+                    _out_rows = df_raw[df_raw.index.isin(_out_s[_out_mask].index)]
+                    st.dataframe(_out_rows.head(100), use_container_width=True)
+
+            # All columns outlier summary
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Outlier summary — all numeric columns (IQR method):**")
+            _out_summary = []
+            for _nc in num_cols:
+                _s2 = df_raw[_nc].dropna()
+                if len(_s2)==0: continue
+                _q1b,_q3b = _s2.quantile(.25),_s2.quantile(.75)
+                _iqrb = _q3b-_q1b
+                _cnt = int(((_s2<_q1b-1.5*_iqrb)|(_s2>_q3b+1.5*_iqrb)).sum())
+                _out_summary.append({"Column":_nc,"Outliers":_cnt,"Pct%":round(_cnt/len(_s2)*100,2)})
+            _out_sum_df = pd.DataFrame(_out_summary).sort_values("Outliers",ascending=False)
+            st.dataframe(_out_sum_df, use_container_width=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 6 — MISSING DATA
+    # ════════════════════════════════════════════════════
+    with t_miss:
+        miss = df_raw.isnull().sum().sort_values(ascending=False)
+        miss = miss[miss>0]
+        if miss.empty:
+            st.success("✅ No missing values — dataset is complete!")
+        else:
+            _miss_df = pd.DataFrame({
+                "Column": miss.index,
+                "Missing Count": miss.values,
+                "Missing %": (miss.values/len(df_raw)*100).round(2),
+                "DType": [str(df_raw[c].dtype) for c in miss.index],
+            })
+            st.dataframe(_miss_df, use_container_width=True)
+
+            fig_ms, (ax_ms1, ax_ms2) = plt.subplots(1,2,figsize=(13,max(3,len(miss)*0.4+1)))
+            bars_ms = ax_ms1.barh(miss.index[::-1], miss.values[::-1], color=C_RED, alpha=0.82, edgecolor="white")
+            ax_ms1.bar_label(bars_ms, padding=3, fontsize=8)
+            ax_ms1.set_xlabel("Missing count"); ax_ms1.set_title("Missing Values Count")
+
+            _miss_pct = (miss/len(df_raw)*100)
+            bars_ms2 = ax_ms2.barh(_miss_pct.index[::-1], _miss_pct.values[::-1], color=C_GOLD, alpha=0.82, edgecolor="white")
+            ax_ms2.bar_label(bars_ms2, fmt="%.1f%%", padding=3, fontsize=8)
+            ax_ms2.set_xlabel("Missing %"); ax_ms2.set_title("Missing Values %")
+            fig_ms.tight_layout(); st.pyplot(fig_ms); plt.close(fig_ms)
+
+            # Missing pattern heatmap
+            if len(miss) > 1:
+                st.markdown("**Missing value pattern heatmap:**")
+                _miss_cols = miss.index.tolist()[:20]
+                _miss_mat = df_raw[_miss_cols].isnull().astype(int).head(200)
+                fig_mp, ax_mp = plt.subplots(figsize=(max(6,len(_miss_cols)*0.6), 4))
+                sns.heatmap(_miss_mat.T, cmap=["#d1fae5","#fee2e2"], cbar=False,
+                            yticklabels=_miss_cols, ax=ax_mp,
+                            linewidths=0.1, linecolor="#e2e6ea")
+                ax_mp.set_xlabel("Row index (first 200)"); ax_mp.set_title("Missing Pattern (red=missing)")
+                fig_mp.tight_layout(); st.pyplot(fig_mp); plt.close(fig_mp)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 7 — STATISTICAL TESTS
+    # ════════════════════════════════════════════════════
+    with t_test:
+        st.markdown("#### 🧪 Statistical Hypothesis Tests")
+        _test_type = st.selectbox("Test", [
+            "Normality — Shapiro-Wilk",
+            "Normality — D'Agostino K²",
+            "Two-sample t-test (independent)",
+            "Paired t-test",
+            "Mann-Whitney U (non-parametric)",
+            "One-way ANOVA",
+            "Chi-Square (categorical independence)",
+            "Levene's test (equal variance)",
+        ], key="stat_test")
+
+        st.markdown('<div class="dm-card">', unsafe_allow_html=True)
+        if "Normality" in _test_type:
+            _nt_col = st.selectbox("Column to test", num_cols, key="nt_col")
+            _nt_s = df_raw[_nt_col].dropna()
+            if len(_nt_s) > 5000:
+                st.info(f"Sampling 5000 rows from {len(_nt_s)} for test.")
+                _nt_s = _nt_s.sample(5000, random_state=42)
+            if st.button("▶ Run Test", key="run_norm"):
+                if "Shapiro" in _test_type:
+                    _stat, _p = _sp_stats.shapiro(_nt_s)
+                    _test_name = "Shapiro-Wilk"
+                else:
+                    _stat, _p = _sp_stats.normaltest(_nt_s)
+                    _test_name = "D'Agostino K²"
+                _pass = _p >= 0.05
+                st.markdown(f"**{_test_name} Result:**")
+                st.markdown(f"- Statistic: `{_stat:.6f}`")
+                st.markdown(f"- p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ Normal (p≥0.05)' if _pass else '❌ Not Normal (p<0.05)'}**")
+                if not _pass:
+                    st.info("💡 Consider log-transform, Box-Cox, or use non-parametric models.")
+
+        elif "Two-sample t-test" in _test_type or "Mann-Whitney" in _test_type:
+            _tt1 = st.selectbox("Numeric column", num_cols, key="tt_col")
+            if cat_cols:
+                _tt_grp = st.selectbox("Group by (categorical)", cat_cols, key="tt_grp")
+                _groups = df_raw[_tt_grp].value_counts().head(10).index.tolist()
+                _g1, _g2 = st.columns(2)
+                with _g1: _grp1 = st.selectbox("Group 1", _groups, key="g1")
+                with _g2: _grp2 = st.selectbox("Group 2", [g for g in _groups if g!=_grp1], key="g2")
+            else:
+                st.info("No categorical columns for grouping."); _tt_grp=_grp1=_grp2=None
+            _alpha = st.slider("Significance level α", 0.01, 0.1, 0.05, 0.01, key="alpha_tt")
+            if st.button("▶ Run Test", key="run_tt") and _tt_grp:
+                _s1 = df_raw[df_raw[_tt_grp]==_grp1][_tt1].dropna()
+                _s2 = df_raw[df_raw[_tt_grp]==_grp2][_tt1].dropna()
+                if "Mann" in _test_type:
+                    _stat,_p = _sp_stats.mannwhitneyu(_s1,_s2,alternative="two-sided")
+                    _tname = "Mann-Whitney U"
+                else:
+                    _stat,_p = _sp_stats.ttest_ind(_s1,_s2)
+                    _tname = "Independent t-test"
+                _pass = _p >= _alpha
+                st.markdown(f"**{_tname}: {_grp1} vs {_grp2}**")
+                st.markdown(f"- n₁={len(_s1)}, n₂={len(_s2)}")
+                st.markdown(f"- Mean₁={_s1.mean():.4f}, Mean₂={_s2.mean():.4f}")
+                st.markdown(f"- Statistic: `{_stat:.4f}`, p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ No significant difference (fail to reject H₀)' if _pass else f'❌ Significant difference at α={_alpha}'}**")
+
+        elif "ANOVA" in _test_type:
+            _an_col = st.selectbox("Numeric column", num_cols, key="an_col")
+            _an_grp = st.selectbox("Group by", cat_cols, key="an_grp") if cat_cols else None
+            if st.button("▶ Run ANOVA", key="run_anova") and _an_grp:
+                _groups_data = [df_raw[df_raw[_an_grp]==g][_an_col].dropna().values
+                                for g in df_raw[_an_grp].unique() if len(df_raw[df_raw[_an_grp]==g])>1]
+                _fstat, _p = _sp_stats.f_oneway(*_groups_data)
+                st.markdown(f"**One-way ANOVA: {_an_col} by {_an_grp}**")
+                st.markdown(f"- F-statistic: `{_fstat:.4f}`, p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ No significant group difference' if _p>=0.05 else '❌ Significant group difference (p<0.05)'}**")
+
+        elif "Chi-Square" in _test_type:
+            if len(cat_cols) >= 2:
+                _chi1 = st.selectbox("Column A", cat_cols, key="chi1")
+                _chi2 = st.selectbox("Column B", [c for c in cat_cols if c!=_chi1], key="chi2")
+                if st.button("▶ Run Chi-Square", key="run_chi"):
+                    _ct = pd.crosstab(df_raw[_chi1], df_raw[_chi2])
+                    _chi2s, _p, _dof, _exp = _sp_stats.chi2_contingency(_ct)
+                    st.markdown(f"**Chi-Square Test: {_chi1} × {_chi2}**")
+                    st.markdown(f"- χ² = `{_chi2s:.4f}`, df = `{_dof}`, p-value = `{_p:.6f}`")
+                    st.markdown(f"- **{'✅ Independent (p≥0.05)' if _p>=0.05 else '❌ Dependent / associated (p<0.05)'}**")
+                    st.dataframe(_ct, use_container_width=True)
+            else:
+                st.info("Need at least 2 categorical columns.")
+
+        elif "Levene" in _test_type:
+            _lev_col = st.selectbox("Numeric column", num_cols, key="lev_col")
+            _lev_grp = st.selectbox("Group by", cat_cols, key="lev_grp") if cat_cols else None
+            if st.button("▶ Run Levene", key="run_lev") and _lev_grp:
+                _gdata = [df_raw[df_raw[_lev_grp]==g][_lev_col].dropna().values
+                          for g in df_raw[_lev_grp].unique() if len(df_raw[df_raw[_lev_grp]==g])>1]
+                _lstat, _lp = _sp_stats.levene(*_gdata)
+                st.markdown(f"**Levene's Test: {_lev_col} by {_lev_grp}**")
+                st.markdown(f"- Statistic: `{_lstat:.4f}`, p-value: `{_lp:.6f}`")
+                st.markdown(f"- **{'✅ Equal variances (p≥0.05)' if _lp>=0.05 else '❌ Unequal variances (p<0.05) — use Welch t-test'}**")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 8 — TIME SERIES
+    # ════════════════════════════════════════════════════
+    with t_ts:
+        st.markdown("#### 📅 Time Series Analysis")
+        _date_candidates = [c for c in df_raw.columns
+                            if df_raw[c].dtype == "object" and df_raw[c].str.match(r"\d{4}").any()]
+        _date_candidates += [c for c in df_raw.columns if "date" in c.lower() or "time" in c.lower()]
+        _date_candidates = list(dict.fromkeys(_date_candidates))
+
+        if not _date_candidates and not num_cols:
+            st.info("No date/time columns detected. Make sure your date column has recognisable date strings.")
+        else:
+            _ts_date = st.selectbox("Date/time column", _date_candidates if _date_candidates else num_cols, key="ts_date")
+            _ts_val  = st.selectbox("Value column", num_cols, key="ts_val")
+            _ts_agg  = st.selectbox("Aggregation", ["None","Daily","Weekly","Monthly"], key="ts_agg")
+
+            if st.button("▶ Plot Time Series", key="ts_plot"):
+                try:
+                    _ts_df = df_raw[[_ts_date, _ts_val]].copy().dropna()
+                    _ts_df[_ts_date] = pd.to_datetime(_ts_df[_ts_date], errors="coerce")
+                    _ts_df = _ts_df.dropna(subset=[_ts_date]).sort_values(_ts_date)
+
+                    if _ts_agg != "None":
+                        _freq = {"Daily":"D","Weekly":"W","Monthly":"ME"}[_ts_agg]
+                        _ts_df = _ts_df.set_index(_ts_date)[_ts_val].resample(_freq).mean().reset_index()
+                        _ts_df.columns = [_ts_date, _ts_val]
+
+                    fig_ts, axes_ts = plt.subplots(3, 1, figsize=(12, 9))
+
+                    # Line plot
+                    axes_ts[0].plot(_ts_df[_ts_date], _ts_df[_ts_val], color=C_BLUE, linewidth=1.2)
+                    axes_ts[0].fill_between(_ts_df[_ts_date], _ts_df[_ts_val], alpha=0.12, color=C_BLUE)
+                    # Rolling mean
+                    _win = max(3, len(_ts_df)//20)
+                    _roll = _ts_df[_ts_val].rolling(_win, center=True).mean()
+                    axes_ts[0].plot(_ts_df[_ts_date], _roll, color=C_RED, linewidth=2,
+                                    linestyle="--", label=f"Rolling mean ({_win})")
+                    axes_ts[0].legend(fontsize=8)
+                    axes_ts[0].set_title(f"{_ts_val} over time ({_ts_agg if _ts_agg!="None" else "raw"})")
+
+                    # Rolling std (volatility)
+                    _rstd = _ts_df[_ts_val].rolling(_win, center=True).std()
+                    axes_ts[1].plot(_ts_df[_ts_date], _rstd, color=C_GOLD, linewidth=1.2)
+                    axes_ts[1].fill_between(_ts_df[_ts_date], _rstd, alpha=0.2, color=C_GOLD)
+                    axes_ts[1].set_title(f"Rolling Std Dev (window={_win}) — Volatility")
+
+                    # First-difference (change)
+                    _diff = _ts_df[_ts_val].diff()
+                    _pos = _diff >= 0
+                    axes_ts[2].bar(_ts_df[_ts_date][_pos],  _diff[_pos],  color=C_GREEN, alpha=0.7, width=1)
+                    axes_ts[2].bar(_ts_df[_ts_date][~_pos], _diff[~_pos], color=C_RED,   alpha=0.7, width=1)
+                    axes_ts[2].axhline(0, color=C_SLATE, linewidth=0.8)
+                    axes_ts[2].set_title("Period-over-Period Change")
+
+                    fig_ts.tight_layout(); st.pyplot(fig_ts); plt.close(fig_ts)
+
+                    # Stats
+                    st.markdown(f"**Period:** {_ts_df[_ts_date].min().date()} → {_ts_df[_ts_date].max().date()} ({len(_ts_df)} points)")
+                    _pct_chg = (_ts_df[_ts_val].iloc[-1] - _ts_df[_ts_val].iloc[0]) / abs(_ts_df[_ts_val].iloc[0]) * 100
+                    st.markdown(f"**Total change:** {_pct_chg:+.2f}%  |  **Max:** {_ts_df[_ts_val].max():.4f}  |  **Min:** {_ts_df[_ts_val].min():.4f}")
+
+                except Exception as _tse:
+                    st.error(f"Time series error: {_tse}")
+
+    # ════════════════════════════════════════════════════
+    #  TAB 9 — PAIRPLOT
+    # ════════════════════════════════════════════════════
+    with t_pair:
+        if len(num_cols) < 2:
+            st.info("Need at least 2 numeric columns for a pairplot.")
+        else:
+            _pp_cols = st.multiselect("Select columns (max 6 recommended)",
+                                      num_cols, default=num_cols[:min(4,len(num_cols))], key="pp_cols")
+            _pp_hue  = st.selectbox("Color by (optional)", ["none"]+cat_cols, key="pp_hue")
+            _pp_diag = st.selectbox("Diagonal", ["hist","kde"], key="pp_diag")
+            if st.button("▶ Generate Pairplot", key="pp_btn") and len(_pp_cols)>=2:
+                with st.spinner("Rendering pairplot…"):
+                    _pp_df = df_raw[_pp_cols+([_pp_hue] if _pp_hue!="none" else [])].dropna()
+                    if len(_pp_df) > 2000:
+                        _pp_df = _pp_df.sample(2000, random_state=42)
+                        st.info("Sampled 2000 rows for performance.")
+                    try:
+                        _hue_arg = _pp_hue if _pp_hue!="none" else None
+                        _pp_fig = sns.pairplot(_pp_df, vars=_pp_cols, hue=_hue_arg,
+                                               diag_kind=_pp_diag, plot_kws={"alpha":0.4,"s":12},
+                                               palette="tab10" if _hue_arg else None)
+                        _pp_fig.figure.suptitle("Pairplot", y=1.01, fontsize=12, fontweight="bold")
+                        st.pyplot(_pp_fig.figure); plt.close()
+                    except Exception as _ppe:
+                        st.error(f"Pairplot error: {_ppe}")
+
+    # ════════════════════════════════════════════════════
+    #  TAB 10 — REPORT
+    # ════════════════════════════════════════════════════
+    with t_rep:
+        st.markdown("#### 📄 Automated EDA Report")
+        st.markdown("Generate a full text summary of your dataset.")
+        if st.button("📝 Generate Report", key="rep_btn"):
+            _lines = []
+            _lines.append(f"# DataMind AI — EDA Report")
+            _lines.append(f"**Dataset shape:** {df_raw.shape[0]:,} rows × {df_raw.shape[1]} columns")
+            _lines.append(f"**Memory usage:** {df_raw.memory_usage(deep=True).sum()/1024**2:.2f} MB")
+            _lines.append(f"**Numeric columns ({len(num_cols)}):** {', '.join(num_cols)}")
+            _lines.append(f"**Categorical columns ({len(cat_cols)}):** {', '.join(cat_cols)}")
+            _lines.append(f"**Missing values:** {miss_total} ({miss_total/df_raw.size*100:.2f}% of all cells)")
+            _lines.append(f"**Duplicate rows:** {dup_total}")
+            _lines.append("")
+            _lines.append("## Numeric Summary")
+            for _nc in num_cols:
+                _s = df_raw[_nc].dropna()
+                _sk = _s.skew(); _ku = _s.kurtosis()
+                _q1b,_q3b = _s.quantile(.25),_s.quantile(.75)
+                _iqrb = _q3b-_q1b
+                _n_out = int(((_s<_q1b-1.5*_iqrb)|(_s>_q3b+1.5*_iqrb)).sum())
+                _lines.append(f"**{_nc}:** mean={_s.mean():.4f}, std={_s.std():.4f}, "
+                              f"min={_s.min():.4f}, max={_s.max():.4f}, "
+                              f"skew={_sk:.2f}, kurt={_ku:.2f}, "
+                              f"missing={_s.isna().sum()}, outliers~{_n_out}")
+            _lines.append("")
+            _lines.append("## Categorical Summary")
+            for _cc in cat_cols:
+                _vc2 = df_raw[_cc].value_counts()
+                _lines.append(f"**{_cc}:** {_vc2.shape[0]} unique values, "
+                              f"top='{_vc2.index[0]}' ({_vc2.iloc[0]} times), "
+                              f"missing={df_raw[_cc].isna().sum()}")
+            _lines.append("")
+            _lines.append("## Recommendations")
+            if miss_total > 0:
+                _miss_cols2 = df_raw.columns[df_raw.isnull().any()].tolist()
+                _lines.append(f"⚠️ **Missing data** in: {', '.join(_miss_cols2)} — apply imputation before modelling.")
+            if dup_total > 0:
+                _lines.append(f"⚠️ **{dup_total} duplicate rows** found — consider deduplication.")
+            _high_skew = [c for c in num_cols if abs(df_raw[c].skew()) > 1]
+            if _high_skew:
+                _lines.append(f"⚠️ **High skewness** in: {', '.join(_high_skew)} — consider log/sqrt transform.")
+            _high_corr_pairs = []
+            if len(num_cols)>=2:
+                _cr2 = df_raw[num_cols].corr().abs()
+                for _i in range(len(num_cols)):
+                    for _j in range(_i+1, len(num_cols)):
+                        if _cr2.iloc[_i,_j] >= 0.9:
+                            _high_corr_pairs.append(f"{num_cols[_i]}↔{num_cols[_j]}")
+            if _high_corr_pairs:
+                _lines.append(f"⚠️ **Near-perfect correlation:** {', '.join(_high_corr_pairs)} — possible multicollinearity.")
+            if not miss_total and not dup_total and not _high_skew and not _high_corr_pairs:
+                _lines.append("✅ Dataset looks clean! No major issues detected.")
+
+            _report_text = "\n\n".join(_lines)
+            st.markdown(_report_text)
+            st.download_button("⬇️ Download Report (.md)",
+                               data=_report_text.encode("utf-8"),
+                               file_name="datamind_eda_report.md",
+                               mime="text/markdown", key="dl_report")
+
+
 #  PAGE: AUTOML
 # ══════════════════════════════════════════════════════════
 elif page=="🤖 AutoML":
