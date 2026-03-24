@@ -1579,8 +1579,7 @@ with st.sidebar:
 
     _nav_pages = [
         "📊 Analysis","🤖 AutoML","📈 Evaluation",
-              "🔮 Inference",
-        "🔬 Rag","🔵 Clustering",
+        "🔬 Rag","🔮 Inference","🔵 Clustering",
         "🧠 Deep Learning","💬 NLP / Text","🤖 Chatbot","🤖 Auto Labeling",
         "💳 Pricing",
     ]
@@ -1691,162 +1690,611 @@ if page=="📊 Analysis":
 #  PAGE: AUTOML
 # ══════════════════════════════════════════════════════════
 elif page=="🤖 AutoML":
-    st.markdown("""<div class="dm-pagehead"><div class="icon">⚙</div>
+    import time as _time
+    from sklearn.model_selection   import GridSearchCV, RandomizedSearchCV, learning_curve
+    from sklearn.inspection        import permutation_importance
+    from sklearn.preprocessing     import PolynomialFeatures
+    from sklearn.feature_selection import SelectKBest, f_classif, f_regression, mutual_info_classif, mutual_info_regression
+    from sklearn.impute            import SimpleImputer
+    from sklearn.ensemble          import VotingClassifier, VotingRegressor, ExtraTreesClassifier, ExtraTreesRegressor
+    from sklearn.svm               import SVR, SVC
+
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🤖</div>
     <div><div class="title">AutoML Training</div>
-    <div class="sub">Configure, train and evaluate machine learning models</div></div></div>""",
+    <div class="sub">Auto-compare · Hyperparameter tuning · Feature engineering · Ensemble · Export</div></div></div>""",
     unsafe_allow_html=True)
 
-    uploaded=st.file_uploader("Upload training CSV",type=["csv"])
+    uploaded = st.file_uploader("Upload training CSV", type=["csv"])
     if not uploaded:
-        st.markdown('<div class="dm-upload"><div class="uicon">⬆</div><div class="hint">Drop a CSV file to begin training</div></div>',unsafe_allow_html=True)
+        st.markdown('<div class="dm-upload"><div class="uicon">⬆</div>'
+                    '<div class="hint">Drop a CSV file to begin training</div></div>',
+                    unsafe_allow_html=True)
         st.stop()
 
-    file_bytes=uploaded.read()
-    df,encoders=cached_feature_engineering(file_bytes)
-    st.session_state.label_encoders=encoders
+    file_bytes = uploaded.read()
+    df, encoders = cached_feature_engineering(file_bytes)
+    st.session_state.label_encoders = encoders
 
-    df_raw_meta=load_csv(file_bytes)
-    st.session_state.col_meta={
-        col:{"type":"cat","values":sorted(df_raw_meta[col].dropna().unique().tolist())}
-             if df_raw_meta[col].dtype=="object" else {"type":"num","values":[]}
+    df_raw_meta = load_csv(file_bytes)
+    st.session_state.col_meta = {
+        col: {"type":"cat","values":sorted(df_raw_meta[col].dropna().unique().tolist())}
+              if df_raw_meta[col].dtype == "object" else {"type":"num","values":[]}
         for col in df_raw_meta.columns}
 
-    st.markdown('<div class="dm-card"><div class="dm-card-title">Target & Feature selection</div>',unsafe_allow_html=True)
-    c1,c2=st.columns([1,2])
-    with c1: target=st.selectbox("🎯 Target column",df.columns)
+    # ── Quick data summary ────────────────────────────────
+    st.markdown('<div class="dm-card"><div class="dm-card-title">Dataset Overview</div>',
+                unsafe_allow_html=True)
+    _ov1,_ov2,_ov3,_ov4 = st.columns(4)
+    _ov1.markdown(f'<div class="dm-kpi"><div class="val">{df.shape[0]:,}</div><div class="lbl">Rows</div></div>',unsafe_allow_html=True)
+    _ov2.markdown(f'<div class="dm-kpi gold"><div class="val">{df.shape[1]:,}</div><div class="lbl">Columns</div></div>',unsafe_allow_html=True)
+    _miss = int(df.isnull().sum().sum())
+    _ov3.markdown(f'<div class="dm-kpi {"red" if _miss>0 else "green"}"><div class="val">{_miss}</div><div class="lbl">Missing Values</div></div>',unsafe_allow_html=True)
+    _dups = int(df.duplicated().sum())
+    _ov4.markdown(f'<div class="dm-kpi {"red" if _dups>0 else "green"}"><div class="val">{_dups}</div><div class="lbl">Duplicates</div></div>',unsafe_allow_html=True)
+    with st.expander("👁 Preview data"):
+        st.dataframe(df.head(10), use_container_width=True)
+        _dtypes = df.dtypes.reset_index(); _dtypes.columns=["Column","DType"]
+        _null_pct = (df.isnull().mean()*100).reset_index(); _null_pct.columns=["Column","Null%"]
+        _info = _dtypes.merge(_null_pct,on="Column")
+        _info["Null%"] = _info["Null%"].round(2)
+        st.dataframe(_info, use_container_width=True)
+    st.markdown('</div>',unsafe_allow_html=True)
+
+    # ── Target & Features ─────────────────────────────────
+    st.markdown('<div class="dm-card"><div class="dm-card-title">Target & Feature Selection</div>',unsafe_allow_html=True)
+    c1,c2 = st.columns([1,2])
+    with c1: target = st.selectbox("🎯 Target column", df.columns)
     with c2:
-        feat_cols=[c for c in df.columns if c!=target]
-        features=st.multiselect("📐 Feature columns",feat_cols,default=feat_cols)
+        feat_cols = [c for c in df.columns if c != target]
+        features  = st.multiselect("📐 Feature columns", feat_cols, default=feat_cols)
     st.markdown('</div>',unsafe_allow_html=True)
 
     if not features: st.warning("Select at least one feature."); st.stop()
 
-    X,y=df[features],df[target]
-    leaky=detect_leakage(X,y)
+    X, y = df[features], df[target]
+    leaky = detect_leakage(X, y)
     if leaky:
-        for col,corr in leaky: st.error(f"🚨 Leakage: **{col}** (corr={corr})")
+        for col,corr in leaky: st.error(f"🚨 Data Leakage: **{col}** (correlation={corr:.3f})")
         st.stop()
 
-    is_cls=y.nunique()<=20 or y.dtype=="object"
-    problem="Classification" if is_cls else "Regression"
-    st.session_state.problem=problem
-    st.markdown(f'<span class="dm-badge {"blue" if is_cls else "gold"}">{"🗂 " if is_cls else "📈 "}{problem}</span>',unsafe_allow_html=True)
+    is_cls  = y.nunique() <= 20 or y.dtype == "object"
+    problem = "Classification" if is_cls else "Regression"
+    st.session_state.problem = problem
+    st.markdown(f'<span class="dm-badge {"blue" if is_cls else "gold"}">{"🗂 " if is_cls else "📈 "}{problem} · {y.nunique()} unique values</span>',
+                unsafe_allow_html=True)
 
-    st.markdown('<div class="dm-card" style="margin-top:1rem"><div class="dm-card-title">Model configuration</div>',unsafe_allow_html=True)
-    if problem=="Classification":
-        mopts={"Random Forest":RandomForestClassifier(n_estimators=100,n_jobs=N_JOBS,random_state=random_seed,max_features="sqrt"),
-               "Hist Gradient Boosting ⚡":HistGradientBoostingClassifier(max_iter=100,random_state=random_seed),
-               "Gradient Boosting":GradientBoostingClassifier(n_estimators=100,random_state=random_seed),
-               "Logistic Regression":LogisticRegression(max_iter=500,n_jobs=N_JOBS,random_state=random_seed,solver="saga"),
-               "KNN":KNeighborsClassifier(n_jobs=N_JOBS,algorithm="ball_tree"),
-               "Decision Tree":DecisionTreeClassifier(random_state=random_seed)}
-    else:
-        mopts={"Random Forest":RandomForestRegressor(n_estimators=100,n_jobs=N_JOBS,random_state=random_seed,max_features="sqrt"),
-               "Hist Gradient Boosting ⚡":HistGradientBoostingRegressor(max_iter=100,random_state=random_seed),
-               "Gradient Boosting":GradientBoostingRegressor(n_estimators=100,random_state=random_seed),
-               "Linear Regression":LinearRegression(n_jobs=N_JOBS),
-               "Ridge":Ridge(),"Lasso":Lasso(),
-               "Decision Tree":DecisionTreeRegressor(random_state=random_seed)}
+    if is_cls and y.value_counts(normalize=True).min() < 0.1:
+        st.warning(f"⚠️ Imbalanced dataset detected — minority class is under 10%. Consider enabling SMOTE or class_weight below.")
 
-    c1,c2,c3=st.columns(3)
-    with c1: model_name=st.selectbox("Model",list(mopts.keys()))
-    with c2: use_scaling=st.checkbox("Feature scaling",value=True)
-    with c3: use_calib=st.checkbox("Probability calibration",value=is_cls)
-    st.markdown('</div>',unsafe_allow_html=True)
+    # ══════════════════════════════════════════════════════
+    #  TABS: Config / Auto-Compare / Tune / Export
+    # ══════════════════════════════════════════════════════
+    _t1, _t2, _t3, _t4 = st.tabs(["⚙️ Configure & Train","🏆 Auto-Compare All","🔧 Hyperparameter Tuning","📦 Preprocessing & Export"])
 
-    steps=([("scaler",StandardScaler())] if use_scaling else [])+[("model",mopts[model_name])]
-    pipeline=Pipeline(steps)
-    if use_calib and problem=="Classification":
-        pipeline=CalibratedClassifierCV(pipeline,cv=3)
+    # ─────────────────────────────────────────────────────
+    #  TAB 1: Configure & Train
+    # ─────────────────────────────────────────────────────
+    with _t1:
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Model & Options</div>',unsafe_allow_html=True)
 
-    if st.button("🚀 Train Model"):
-        # ── Project limit gate ──────────────────────────────
-        if st.session_state.auth_plan == "free" and st.session_state.auth_proj_used >= PLAN_FREE_PROJ:
-            st.warning(
-                f"You have used all {PLAN_FREE_PROJ} free projects. "
-                "Upgrade to Premium (₹1000/month) for unlimited projects.")
-            if st.button("⬆️ Upgrade Now", key="automl_upgrade_btn"):
-                st.session_state.auth_page = "payment"
-                st.rerun()
-            st.stop()
-        _increment_project(st.session_state.auth_uid)
-        # ───────────────────────────────────────────────────
-        with st.spinner("Training in progress…"):
-            strat=y if (problem=="Classification" and y.nunique()>1) else None
-            X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=test_size,random_state=random_seed,stratify=strat)
-            pipeline.fit(X_train,y_train); preds=pipeline.predict(X_test); proba=None
+        if problem == "Classification":
+            mopts = {
+                "Random Forest":           RandomForestClassifier(n_estimators=200, n_jobs=N_JOBS, random_state=random_seed, max_features="sqrt"),
+                "Extra Trees ⚡":           ExtraTreesClassifier(n_estimators=200, n_jobs=N_JOBS, random_state=random_seed),
+                "Hist Gradient Boosting ⚡":HistGradientBoostingClassifier(max_iter=200, random_state=random_seed),
+                "Gradient Boosting":       GradientBoostingClassifier(n_estimators=200, random_state=random_seed),
+                "Logistic Regression":     LogisticRegression(max_iter=1000, n_jobs=N_JOBS, random_state=random_seed, solver="saga"),
+                "KNN":                     KNeighborsClassifier(n_jobs=N_JOBS, algorithm="ball_tree"),
+                "Decision Tree":           DecisionTreeClassifier(random_state=random_seed),
+                "SVM (Linear)":            SVC(kernel="linear", probability=True, random_state=random_seed),
+            }
+        else:
+            mopts = {
+                "Random Forest":           RandomForestRegressor(n_estimators=200, n_jobs=N_JOBS, random_state=random_seed),
+                "Extra Trees ⚡":           ExtraTreesRegressor(n_estimators=200, n_jobs=N_JOBS, random_state=random_seed),
+                "Hist Gradient Boosting ⚡":HistGradientBoostingRegressor(max_iter=200, random_state=random_seed),
+                "Gradient Boosting":       GradientBoostingRegressor(n_estimators=200, random_state=random_seed),
+                "Linear Regression":       LinearRegression(n_jobs=N_JOBS),
+                "Ridge":                   Ridge(),
+                "Lasso":                   Lasso(),
+                "SVR":                     SVR(kernel="rbf"),
+                "Decision Tree":           DecisionTreeRegressor(random_state=random_seed),
+            }
 
-            if problem=="Classification":
-                score=accuracy_score(y_test,preds); f1=f1_score(y_test,preds,average="weighted")
-                try: proba=pipeline.predict_proba(X_test); auc=roc_auc_score(y_test,proba[:,1]) if y.nunique()==2 else None
-                except: auc=None
+        mc1,mc2,mc3 = st.columns(3)
+        with mc1: model_name = st.selectbox("Model", list(mopts.keys()))
+        with mc2: use_scaling = st.checkbox("Feature scaling", value=True)
+        with mc3: use_calib = st.checkbox("Probability calibration", value=is_cls)
+
+        mc4,mc5,mc6 = st.columns(3)
+        with mc4:
+            impute_strat = st.selectbox("Missing value imputation",
+                                        ["mean","median","most_frequent","none"], index=1)
+        with mc5:
+            feat_sel = st.selectbox("Feature selection",
+                                    ["none","SelectKBest (f-score)","SelectKBest (mutual info)"], index=0)
+        with mc6:
+            if feat_sel != "none":
+                k_best = st.slider("K best features", 1, len(features), min(len(features), 10), key="aml_k")
             else:
-                score=r2_score(y_test,preds); mae=mean_absolute_error(y_test,preds)
-                rmse=mean_squared_error(y_test,preds)**0.5; f1=auc=None
+                k_best = len(features)
 
-            cv_scores=cross_val_score(pipeline,X,y,cv=cv_folds,n_jobs=N_JOBS,
-                                      scoring="accuracy" if problem=="Classification" else "r2")
-
-            # SHAP — premium only
-            if st.session_state.auth_plan == "premium":
-                sv=compute_shap(pipeline,X_train,X_test,features)
-                st.session_state.shap_values=sv; st.session_state.shap_X=X_test
+        mc7,mc8 = st.columns(2)
+        with mc7:
+            poly_deg = st.selectbox("Polynomial features degree", [1,2,3], index=0,
+                                    help="Adds interaction terms. Degree 2 = x1*x2 features.")
+        with mc8:
+            if is_cls:
+                class_weight = st.selectbox("Class weight (imbalance)", ["none","balanced"], index=0)
             else:
-                st.session_state.shap_values=None; st.session_state.shap_X=None
+                class_weight = "none"
 
-        st.session_state.update(model=pipeline,features=features,train_df=X,
-                                 y_test=y_test,preds=preds,proba=proba)
+        # Apply class_weight if supported
+        if class_weight == "balanced" and is_cls:
+            m = mopts[model_name]
+            if hasattr(m, "class_weight"):
+                m.set_params(class_weight="balanced")
 
-        record={"model":model_name,"problem":problem,"score":round(score,4),
-                "cv_mean":round(cv_scores.mean(),4),"cv_std":round(cv_scores.std(),4),
-                "features":features,"rows":int(X.shape[0])}
-        st.session_state.history.append(record)
-
-        best=max(st.session_state.history,key=lambda x:x["score"])
-
-        kpis=([(f"Accuracy",f"{score:.3f}",""),("F1 Score",f"{f1:.3f}","gold"),
-               ("CV Mean",f"{cv_scores.mean():.3f}","green"),("AUC-ROC",f"{auc:.3f}" if auc else "N/A","")]
-              if problem=="Classification" else
-              [("R² Score",f"{score:.3f}",""),("MAE",f"{mae:.3f}","gold"),
-               ("RMSE",f"{rmse:.3f}","red"),("CV Mean",f"{cv_scores.mean():.3f}","green")])
-        st.markdown('<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem">'
-                    +"".join(f'<div class="dm-kpi {cls}"><div class="val">{val}</div><div class="lbl">{lbl}</div></div>'
-                             for lbl,val,cls in kpis)+'</div>',unsafe_allow_html=True)
-
-        st.markdown(f'<div class="dm-card" style="display:flex;align-items:center;gap:0.75rem">'
-                    f'<span class="dm-badge green">🏆 Best</span>'
-                    f'<span style="font-family:IBM Plex Mono,monospace;font-size:0.82rem">{best["model"]} — {best["score"]}</span>'
-                    f'</div>',unsafe_allow_html=True)
-
-        if problem=="Classification":
-            with st.expander("📋 Classification report"):
-                st.code(classification_report(y_test,preds),language="text")
-
-        # Feature importance plot
-        try:
-            inner=pipeline.base_estimator if use_calib else pipeline
-            fi_m=inner.named_steps.get("model",inner) if hasattr(inner,"named_steps") else inner
-            if hasattr(fi_m,"feature_importances_"):
-                imp_df=pd.DataFrame({"Feature":features,"Importance":fi_m.feature_importances_})\
-                         .sort_values("Importance",ascending=True).tail(15)
-                fig,ax=plt.subplots(figsize=(7,max(3,len(imp_df)*0.4)))
-                colors=[C_RED if v<0.01 else C_BLUE for v in imp_df["Importance"]]
-                bars=ax.barh(imp_df["Feature"],imp_df["Importance"],color=colors,alpha=0.82,edgecolor="white",linewidth=0.5)
-                ax.bar_label(bars,fmt="%.4f",padding=4,fontsize=7.5,color=C_SLATE)
-                ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
-                ax.set_title("Feature Importance (top 15)"); fig.tight_layout(); st.pyplot(fig); plt.close(fig)
-        except: pass
-
-        st.download_button("💾 Download model (.pkl)",data=pickle.dumps(pipeline),
-                           file_name=f"datamind_{model_name.lower().replace(' ','_')}.pkl",
-                           mime="application/octet-stream")
-
-    if st.session_state.history:
-        st.markdown('<div class="dm-card"><div class="dm-card-title">Experiment history</div>',unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(st.session_state.history),use_container_width=True)
         st.markdown('</div>',unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════
+        # Build pipeline steps
+        _pipe_steps = []
+        if impute_strat != "none":
+            _pipe_steps.append(("imputer", SimpleImputer(strategy=impute_strat)))
+        if use_scaling:
+            _pipe_steps.append(("scaler", StandardScaler()))
+        if poly_deg > 1:
+            _pipe_steps.append(("poly", PolynomialFeatures(degree=poly_deg, include_bias=False)))
+        if feat_sel == "SelectKBest (f-score)":
+            _scorer = f_classif if is_cls else f_regression
+            _pipe_steps.append(("selector", SelectKBest(_scorer, k=k_best)))
+        elif feat_sel == "SelectKBest (mutual info)":
+            _scorer = mutual_info_classif if is_cls else mutual_info_regression
+            _pipe_steps.append(("selector", SelectKBest(_scorer, k=k_best)))
+        _pipe_steps.append(("model", mopts[model_name]))
+        pipeline = Pipeline(_pipe_steps)
+        if use_calib and problem == "Classification":
+            pipeline = CalibratedClassifierCV(pipeline, cv=3)
+
+        if st.button("🚀 Train Model", key="aml_train_btn"):
+            if st.session_state.auth_plan=="free" and st.session_state.auth_proj_used >= PLAN_FREE_PROJ:
+                st.warning(f"You have used all {PLAN_FREE_PROJ} free projects. Upgrade to Premium (₹1000/month) for unlimited projects.")
+                if st.button("⬆️ Upgrade Now", key="automl_upgrade_btn"):
+                    st.session_state.auth_page="payment"; st.rerun()
+                st.stop()
+            _increment_project(st.session_state.auth_uid)
+
+            with st.spinner("Training in progress…"):
+                _t0 = _time.time()
+                strat = y if (problem=="Classification" and y.nunique()>1) else None
+                X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=test_size,random_state=random_seed,stratify=strat)
+                pipeline.fit(X_train, y_train)
+                preds = pipeline.predict(X_test)
+                proba = None
+                train_time = round(_time.time()-_t0, 2)
+
+                if problem=="Classification":
+                    score = accuracy_score(y_test,preds)
+                    f1    = f1_score(y_test,preds,average="weighted")
+                    try: proba=pipeline.predict_proba(X_test); auc=roc_auc_score(y_test,proba[:,1]) if y.nunique()==2 else None
+                    except: auc=None
+                    train_score = accuracy_score(y_train, pipeline.predict(X_train))
+                else:
+                    score=r2_score(y_test,preds); mae=mean_absolute_error(y_test,preds)
+                    rmse=mean_squared_error(y_test,preds)**0.5; f1=auc=None
+                    train_score = r2_score(y_train, pipeline.predict(X_train))
+
+                cv_scores = cross_val_score(pipeline,X,y,cv=cv_folds,n_jobs=N_JOBS,
+                                            scoring="accuracy" if problem=="Classification" else "r2")
+
+                # SHAP
+                if st.session_state.auth_plan=="premium":
+                    sv = compute_shap(pipeline, X_train, X_test, features)
+                    st.session_state.shap_values=sv; st.session_state.shap_X=X_test
+                else:
+                    st.session_state.shap_values=None; st.session_state.shap_X=None
+
+            st.session_state.update(model=pipeline, features=features, train_df=X,
+                                    y_test=y_test, preds=preds, proba=proba)
+
+            record = {"model":model_name,"problem":problem,"score":round(score,4),
+                      "train_score":round(train_score,4),"cv_mean":round(cv_scores.mean(),4),
+                      "cv_std":round(cv_scores.std(),4),"features":features,
+                      "rows":int(X.shape[0]),"train_time_s":train_time}
+            st.session_state.history.append(record)
+            best = max(st.session_state.history, key=lambda x: x["score"])
+
+            # ── KPI row ──
+            if problem=="Classification":
+                kpis=[("Accuracy",f"{score:.4f}",""),("F1 Score",f"{f1:.4f}","gold"),
+                      ("CV Mean±Std",f"{cv_scores.mean():.3f}±{cv_scores.std():.3f}","green"),
+                      ("AUC-ROC",f"{auc:.4f}" if auc else "N/A",""),
+                      ("Train Acc",f"{train_score:.4f}",""),("Train Time",f"{train_time}s","")]
+            else:
+                kpis=[("R² Score",f"{score:.4f}",""),("MAE",f"{mae:.4f}","gold"),
+                      ("RMSE",f"{rmse:.4f}","red"),("CV Mean",f"{cv_scores.mean():.4f}","green"),
+                      ("Train R²",f"{train_score:.4f}",""),("Train Time",f"{train_time}s","")]
+
+            st.markdown('<div style="display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0">'
+                + "".join(f'<div class="dm-kpi {cls}"><div class="val" style="font-size:1.2rem">{val}</div><div class="lbl">{lbl}</div></div>'
+                           for lbl,val,cls in kpis)+'</div>', unsafe_allow_html=True)
+
+            # Overfit warning
+            gap = abs(train_score - score)
+            if gap > 0.15:
+                st.warning(f"⚠️ Possible **overfitting** — train score ({train_score:.3f}) vs test score ({score:.3f}). Consider reducing model complexity or enabling regularisation.")
+
+            st.markdown(f'<div class="dm-card" style="display:flex;align-items:center;gap:.75rem">'
+                        f'<span class="dm-badge green">🏆 Best so far</span>'
+                        f'<span style="font-family:IBM Plex Mono,monospace;font-size:.82rem">'
+                        f'{best["model"]} — {best["score"]}</span></div>', unsafe_allow_html=True)
+
+            if problem=="Classification":
+                with st.expander("📋 Classification Report"):
+                    st.code(classification_report(y_test,preds), language="text")
+
+            # ── Feature importance ──
+            try:
+                inner  = pipeline.base_estimator if use_calib else pipeline
+                fi_m   = inner.named_steps.get("model",inner) if hasattr(inner,"named_steps") else inner
+                sel    = inner.named_steps.get("selector") if hasattr(inner,"named_steps") else None
+                f_names= features
+                if sel is not None and hasattr(sel,"get_support"):
+                    f_names = [f for f,b in zip(features, sel.get_support()) if b]
+                if hasattr(fi_m,"feature_importances_"):
+                    imp_df = pd.DataFrame({"Feature":f_names,"Importance":fi_m.feature_importances_})\
+                               .sort_values("Importance",ascending=True).tail(20)
+                    fig,ax = plt.subplots(figsize=(7, max(3, len(imp_df)*0.38)))
+                    colors = [C_RED if v<0.01 else C_BLUE for v in imp_df["Importance"]]
+                    bars   = ax.barh(imp_df["Feature"], imp_df["Importance"], color=colors,
+                                     alpha=0.85, edgecolor="white", linewidth=0.5)
+                    ax.bar_label(bars, fmt="%.4f", padding=4, fontsize=7.5, color=C_SLATE)
+                    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+                    ax.set_title("Feature Importance (top 20)")
+                    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+            except: pass
+
+            # ── Permutation importance ──
+            with st.expander("🔀 Permutation Importance (test set)"):
+                try:
+                    _scoring = "accuracy" if problem=="Classification" else "r2"
+                    _perm = permutation_importance(pipeline, X_test, y_test,
+                                                   n_repeats=10, random_state=random_seed,
+                                                   n_jobs=N_JOBS, scoring=_scoring)
+                    _perm_df = pd.DataFrame({
+                        "Feature": features,
+                        "Importance Mean": _perm.importances_mean,
+                        "Std": _perm.importances_std,
+                    }).sort_values("Importance Mean", ascending=True).tail(20)
+                    fig_p, ax_p = plt.subplots(figsize=(7, max(3, len(_perm_df)*0.38)))
+                    ax_p.barh(_perm_df["Feature"], _perm_df["Importance Mean"],
+                              xerr=_perm_df["Std"], color=C_PURPLE, alpha=0.8,
+                              edgecolor="white", capsize=3)
+                    ax_p.axvline(0, color=C_RED, linewidth=1, linestyle="--")
+                    ax_p.set_title("Permutation Importance (negative = hurts model)")
+                    fig_p.tight_layout(); st.pyplot(fig_p); plt.close(fig_p)
+                except Exception as _pe:
+                    st.info(f"Permutation importance unavailable: {_pe}")
+
+            # ── Learning curves ──
+            with st.expander("📉 Learning Curves"):
+                try:
+                    _lc_sizes = np.linspace(0.1, 1.0, 8)
+                    _scoring  = "accuracy" if problem=="Classification" else "r2"
+                    train_sz, train_sc, val_sc = learning_curve(
+                        pipeline, X, y, train_sizes=_lc_sizes, cv=min(5,cv_folds),
+                        scoring=_scoring, n_jobs=N_JOBS, random_state=random_seed)
+                    fig_lc, ax_lc = plt.subplots(figsize=(7,3.5))
+                    ax_lc.plot(train_sz, train_sc.mean(1), "o-", color=C_BLUE, label="Train")
+                    ax_lc.fill_between(train_sz,
+                        train_sc.mean(1)-train_sc.std(1),
+                        train_sc.mean(1)+train_sc.std(1), alpha=0.15, color=C_BLUE)
+                    ax_lc.plot(train_sz, val_sc.mean(1), "o-", color=C_GREEN, label="Validation")
+                    ax_lc.fill_between(train_sz,
+                        val_sc.mean(1)-val_sc.std(1),
+                        val_sc.mean(1)+val_sc.std(1), alpha=0.15, color=C_GREEN)
+                    ax_lc.set_xlabel("Training samples"); ax_lc.set_ylabel(_scoring)
+                    ax_lc.set_title("Learning Curves"); ax_lc.legend()
+                    fig_lc.tight_layout(); st.pyplot(fig_lc); plt.close(fig_lc)
+                except Exception as _lce:
+                    st.info(f"Learning curves unavailable: {_lce}")
+
+            # ── Residuals (Regression) ──
+            if problem == "Regression":
+                with st.expander("📊 Residuals Analysis"):
+                    residuals = y_test - preds
+                    fig_r, (ax_r1, ax_r2) = plt.subplots(1, 2, figsize=(10, 3.5))
+                    ax_r1.scatter(preds, residuals, alpha=0.45, color=C_BLUE, s=18)
+                    ax_r1.axhline(0, color=C_RED, linewidth=1.2, linestyle="--")
+                    ax_r1.set_xlabel("Predicted"); ax_r1.set_ylabel("Residual")
+                    ax_r1.set_title("Residuals vs Predicted")
+                    ax_r2.hist(residuals, bins=30, color=C_PURPLE, alpha=0.75, edgecolor="white")
+                    ax_r2.set_xlabel("Residual"); ax_r2.set_title("Residual Distribution")
+                    fig_r.tight_layout(); st.pyplot(fig_r); plt.close(fig_r)
+
+            # ── Predicted vs Actual (Regression) ──
+            if problem == "Regression":
+                with st.expander("🎯 Predicted vs Actual"):
+                    fig_pa, ax_pa = plt.subplots(figsize=(5,4))
+                    ax_pa.scatter(y_test, preds, alpha=0.4, color=C_BLUE, s=18)
+                    _mn, _mx = min(y_test.min(), preds.min()), max(y_test.max(), preds.max())
+                    ax_pa.plot([_mn,_mx],[_mn,_mx], color=C_RED, linewidth=1.5, linestyle="--", label="Perfect fit")
+                    ax_pa.set_xlabel("Actual"); ax_pa.set_ylabel("Predicted")
+                    ax_pa.set_title("Predicted vs Actual"); ax_pa.legend()
+                    fig_pa.tight_layout(); st.pyplot(fig_pa); plt.close(fig_pa)
+
+            st.download_button("💾 Download model (.pkl)", data=pickle.dumps(pipeline),
+                               file_name=f"datamind_{model_name.lower().replace(' ','_')}.pkl",
+                               mime="application/octet-stream")
+
+    if st.session_state.history:
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Experiment History</div>',unsafe_allow_html=True)
+        _h_df = pd.DataFrame(st.session_state.history)
+        st.dataframe(_h_df, use_container_width=True)
+        # mini score comparison bar
+        if len(_h_df) > 1:
+            fig_h, ax_h = plt.subplots(figsize=(max(5, len(_h_df)*0.9), 3))
+            _colors = [C_GREEN if s == _h_df["score"].max() else C_BLUE for s in _h_df["score"]]
+            ax_h.bar(_h_df["model"], _h_df["score"], color=_colors, edgecolor="white")
+            ax_h.bar_label(ax_h.containers[0], fmt="%.4f", padding=3, fontsize=8)
+            ax_h.set_title("Experiment Scores"); plt.xticks(rotation=30, ha="right")
+            fig_h.tight_layout(); st.pyplot(fig_h); plt.close(fig_h)
+        st.markdown('</div>',unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────
+    #  TAB 2: Auto-Compare All Models
+    # ─────────────────────────────────────────────────────
+    with _t2:
+        st.markdown("#### 🏆 Auto-Compare All Models")
+        st.markdown("Trains every available model and ranks them by test score. Great for finding the best algorithm for your data.")
+
+        _ac1, _ac2 = st.columns(2)
+        with _ac1: _ac_scale = st.checkbox("Use feature scaling", value=True, key="ac_scale")
+        with _ac2: _ac_impute = st.selectbox("Imputation", ["mean","median","most_frequent"], key="ac_imp")
+
+        if st.button("🔬 Run Auto-Compare", key="ac_run_btn"):
+            if st.session_state.auth_plan=="free" and st.session_state.auth_proj_used>=PLAN_FREE_PROJ:
+                st.warning("Upgrade to Premium to use Auto-Compare."); st.stop()
+
+            if problem=="Classification":
+                _all_models = {
+                    "Random Forest":           RandomForestClassifier(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
+                    "Extra Trees":             ExtraTreesClassifier(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
+                    "Hist Gradient Boosting":  HistGradientBoostingClassifier(max_iter=100, random_state=random_seed),
+                    "Gradient Boosting":       GradientBoostingClassifier(n_estimators=100, random_state=random_seed),
+                    "Logistic Regression":     LogisticRegression(max_iter=1000, n_jobs=N_JOBS, solver="saga"),
+                    "Decision Tree":           DecisionTreeClassifier(random_state=random_seed),
+                    "KNN":                     KNeighborsClassifier(n_jobs=N_JOBS),
+                }
+            else:
+                _all_models = {
+                    "Random Forest":           RandomForestRegressor(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
+                    "Extra Trees":             ExtraTreesRegressor(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
+                    "Hist Gradient Boosting":  HistGradientBoostingRegressor(max_iter=100, random_state=random_seed),
+                    "Gradient Boosting":       GradientBoostingRegressor(n_estimators=100, random_state=random_seed),
+                    "Linear Regression":       LinearRegression(n_jobs=N_JOBS),
+                    "Ridge":                   Ridge(),
+                    "Lasso":                   Lasso(),
+                    "Decision Tree":           DecisionTreeRegressor(random_state=random_seed),
+                }
+
+            strat = y if (problem=="Classification" and y.nunique()>1) else None
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, random_state=random_seed, stratify=strat)
+            _scoring = "accuracy" if problem=="Classification" else "r2"
+            _results = []
+            _prog = st.progress(0, text="Comparing models…")
+            for _mi, (_mn, _mo) in enumerate(_all_models.items()):
+                _prog.progress((_mi+1)/len(_all_models), text=f"Training {_mn}…")
+                try:
+                    _steps = [("imputer", SimpleImputer(strategy=_ac_impute))]
+                    if _ac_scale: _steps.append(("scaler", StandardScaler()))
+                    _steps.append(("model", _mo))
+                    _pl = Pipeline(_steps)
+                    _t0 = _time.time()
+                    _pl.fit(X_tr, y_tr)
+                    _pr = _pl.predict(X_te)
+                    _s  = accuracy_score(y_te,_pr) if problem=="Classification" else r2_score(y_te,_pr)
+                    _cv = cross_val_score(_pl, X, y, cv=3, scoring=_scoring, n_jobs=N_JOBS)
+                    _results.append({
+                        "Model": _mn,
+                        "Test Score": round(_s, 4),
+                        "CV Mean": round(_cv.mean(), 4),
+                        "CV Std": round(_cv.std(), 4),
+                        "Time (s)": round(_time.time()-_t0, 2),
+                    })
+                except Exception as _e:
+                    _results.append({"Model":_mn,"Test Score":None,"CV Mean":None,"CV Std":None,"Time (s)":None})
+            _prog.empty()
+
+            _res_df = pd.DataFrame(_results).sort_values("Test Score", ascending=False).reset_index(drop=True)
+            _res_df.index += 1
+            _best_row = _res_df.iloc[0]
+            st.success(f"🏆 Best model: **{_best_row['Model']}** — Test Score: **{_best_row['Test Score']}** | CV: {_best_row['CV Mean']} ± {_best_row['CV Std']}")
+            st.dataframe(_res_df, use_container_width=True)
+
+            # Bar chart comparison
+            fig_ac, ax_ac = plt.subplots(figsize=(8, 4))
+            _colors_ac = [C_GREEN if i==0 else C_BLUE for i in range(len(_res_df))]
+            bars_ac = ax_ac.barh(_res_df["Model"][::-1], _res_df["Test Score"][::-1],
+                                  color=_colors_ac[::-1], edgecolor="white", alpha=0.85)
+            ax_ac.bar_label(bars_ac, fmt="%.4f", padding=4, fontsize=8)
+            ax_ac.set_title(f"Model Comparison — {_scoring}")
+            ax_ac.set_xlabel(_scoring)
+            fig_ac.tight_layout(); st.pyplot(fig_ac); plt.close(fig_ac)
+
+    # ─────────────────────────────────────────────────────
+    #  TAB 3: Hyperparameter Tuning
+    # ─────────────────────────────────────────────────────
+    with _t3:
+        st.markdown("#### 🔧 Hyperparameter Tuning")
+        st.markdown("Automatically search for the best hyperparameters using Grid Search or Random Search.")
+
+        _ht1, _ht2, _ht3 = st.columns(3)
+        with _ht1:
+            _tune_model = st.selectbox("Model to tune",
+                ["Random Forest","Hist Gradient Boosting","Logistic Regression","Decision Tree",
+                 "Ridge","Lasso"] if problem=="Classification"
+                else ["Random Forest","Hist Gradient Boosting","Ridge","Lasso","Decision Tree"],
+                key="tune_model_sel")
+        with _ht2:
+            _search_type = st.selectbox("Search strategy",["Random Search","Grid Search"], key="tune_search")
+        with _ht3:
+            _n_iter = st.slider("Iterations (Random Search)", 5, 50, 15, key="tune_iter")
+
+        # Param grids
+        _param_grids = {
+            "Random Forest": {
+                "model__n_estimators": [50, 100, 200, 300],
+                "model__max_depth": [None, 5, 10, 20],
+                "model__min_samples_split": [2, 5, 10],
+                "model__max_features": ["sqrt","log2", 0.5],
+            },
+            "Hist Gradient Boosting": {
+                "model__max_iter": [50, 100, 200],
+                "model__learning_rate": [0.01, 0.05, 0.1, 0.2],
+                "model__max_depth": [None, 3, 5, 7],
+                "model__l2_regularization": [0, 0.1, 1.0],
+            },
+            "Logistic Regression": {
+                "model__C": [0.01, 0.1, 1, 5, 10],
+                "model__penalty": ["l1","l2","elasticnet"],
+                "model__solver": ["saga"],
+                "model__l1_ratio": [0, 0.25, 0.5, 0.75, 1.0],
+            },
+            "Decision Tree": {
+                "model__max_depth": [None, 3, 5, 10, 20],
+                "model__min_samples_split": [2, 5, 10, 20],
+                "model__criterion": ["gini","entropy"] if is_cls else ["squared_error","absolute_error"],
+            },
+            "Ridge": {"model__alpha": [0.01, 0.1, 1, 5, 10, 50, 100]},
+            "Lasso": {"model__alpha": [0.001, 0.01, 0.1, 1, 5, 10]},
+        }
+
+        _pgrid = _param_grids.get(_tune_model, {})
+        st.markdown("**Parameter grid being searched:**")
+        st.json(_pgrid)
+
+        if st.button("🔍 Start Tuning", key="tune_start_btn"):
+            if st.session_state.auth_plan=="free" and st.session_state.auth_proj_used>=PLAN_FREE_PROJ:
+                st.warning("Upgrade to Premium to use Hyperparameter Tuning."); st.stop()
+
+            with st.spinner(f"Running {_search_type} on {_tune_model}…"):
+                strat = y if (problem=="Classification" and y.nunique()>1) else None
+                X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, random_state=random_seed, stratify=strat)
+
+                if problem=="Classification":
+                    _base = {"Random Forest": RandomForestClassifier(n_jobs=N_JOBS, random_state=random_seed),
+                             "Hist Gradient Boosting": HistGradientBoostingClassifier(random_state=random_seed),
+                             "Logistic Regression": LogisticRegression(max_iter=1000, solver="saga"),
+                             "Decision Tree": DecisionTreeClassifier(random_state=random_seed)}.get(_tune_model)
+                else:
+                    _base = {"Random Forest": RandomForestRegressor(n_jobs=N_JOBS, random_state=random_seed),
+                             "Hist Gradient Boosting": HistGradientBoostingRegressor(random_state=random_seed),
+                             "Ridge": Ridge(), "Lasso": Lasso(),
+                             "Decision Tree": DecisionTreeRegressor(random_state=random_seed)}.get(_tune_model)
+
+                if _base is None:
+                    st.error("Model not available for tuning."); st.stop()
+
+                _tune_pipe = Pipeline([("imputer", SimpleImputer(strategy="median")),
+                                       ("scaler", StandardScaler()),
+                                       ("model", _base)])
+                _scoring   = "accuracy" if problem=="Classification" else "r2"
+
+                try:
+                    if _search_type == "Random Search":
+                        _searcher = RandomizedSearchCV(_tune_pipe, _pgrid, n_iter=_n_iter,
+                                                       cv=cv_folds, scoring=_scoring,
+                                                       n_jobs=N_JOBS, random_state=random_seed, verbose=0)
+                    else:
+                        _searcher = GridSearchCV(_tune_pipe, _pgrid, cv=cv_folds,
+                                                 scoring=_scoring, n_jobs=N_JOBS, verbose=0)
+
+                    _searcher.fit(X_tr, y_tr)
+                    _best_pl = _searcher.best_estimator_
+                    _best_preds = _best_pl.predict(X_te)
+                    _best_score = accuracy_score(y_te,_best_preds) if problem=="Classification" else r2_score(y_te,_best_preds)
+
+                    st.success(f"✅ Best CV Score: **{_searcher.best_score_:.4f}** | Test Score: **{_best_score:.4f}**")
+                    st.markdown("**Best parameters found:**")
+                    _bp = {k.replace("model__",""):v for k,v in _searcher.best_params_.items()}
+                    st.json(_bp)
+
+                    # CV results table
+                    _cv_res = pd.DataFrame(_searcher.cv_results_)[["mean_test_score","std_test_score","rank_test_score"]]\
+                                .sort_values("rank_test_score").head(10).reset_index(drop=True)
+                    _cv_res.columns = ["Mean CV Score","Std","Rank"]
+                    st.markdown("**Top 10 parameter combinations:**")
+                    st.dataframe(_cv_res, use_container_width=True)
+
+                    # Save best tuned model
+                    st.session_state.model    = _best_pl
+                    st.session_state.y_test   = y_te
+                    st.session_state.preds    = _best_preds
+                    st.download_button("💾 Download tuned model (.pkl)",
+                                       data=pickle.dumps(_best_pl),
+                                       file_name=f"datamind_{_tune_model.lower().replace(' ','_')}_tuned.pkl",
+                                       mime="application/octet-stream", key="tune_dl")
+                except Exception as _te:
+                    st.error(f"Tuning failed: {_te}")
+
+    # ─────────────────────────────────────────────────────
+    #  TAB 4: Preprocessing & Export
+    # ─────────────────────────────────────────────────────
+    with _t4:
+        st.markdown("#### 📦 Preprocessing Preview & Export")
+
+        _pp1, _pp2 = st.columns(2)
+        with _pp1:
+            st.markdown("**Missing values per column:**")
+            _miss_df = df[features].isnull().sum().reset_index()
+            _miss_df.columns = ["Column","Missing"]
+            _miss_df["Missing %"] = (_miss_df["Missing"]/len(df)*100).round(2)
+            _miss_df = _miss_df[_miss_df["Missing"]>0]
+            if _miss_df.empty:
+                st.success("✅ No missing values!")
+            else:
+                st.dataframe(_miss_df, use_container_width=True)
+
+        with _pp2:
+            st.markdown("**Class distribution (target):**")
+            _vc = y.value_counts().reset_index()
+            _vc.columns = ["Value","Count"]
+            _vc["Pct%"] = (_vc["Count"]/len(y)*100).round(2)
+            st.dataframe(_vc.head(20), use_container_width=True)
+
+        st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+        st.markdown("**Correlation heatmap (numeric features):**")
+        _num_feats = [f for f in features if pd.api.types.is_numeric_dtype(df[f])]
+        if len(_num_feats) > 1:
+            _corr = df[_num_feats[:20]].corr()
+            fig_corr, ax_corr = plt.subplots(figsize=(min(12, len(_num_feats)*0.7+2),
+                                                       min(10, len(_num_feats)*0.7+2)))
+            sns.heatmap(_corr, annot=len(_num_feats)<=15, fmt=".2f", cmap="coolwarm",
+                        center=0, linewidths=0.5, ax=ax_corr,
+                        annot_kws={"size":7} if len(_num_feats)<=15 else {})
+            ax_corr.set_title("Feature Correlation Matrix")
+            fig_corr.tight_layout(); st.pyplot(fig_corr); plt.close(fig_corr)
+        else:
+            st.info("Need at least 2 numeric features for a correlation heatmap.")
+
+        st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+        st.markdown("**Export processed dataset:**")
+        _ex1, _ex2 = st.columns(2)
+        with _ex1:
+            _proc_csv = df[features + [target]].to_csv(index=False).encode()
+            st.download_button("⬇️ Download processed CSV", data=_proc_csv,
+                               file_name="datamind_processed.csv", mime="text/csv", key="dl_proc_csv")
+        with _ex2:
+            if st.session_state.model:
+                st.download_button("💾 Download trained model (.pkl)",
+                                   data=pickle.dumps(st.session_state.model),
+                                   file_name="datamind_model.pkl",
+                                   mime="application/octet-stream", key="dl_model_final")
+            else:
+                st.info("Train a model first to download it.")
+
+
 #  PAGE: EVALUATION
 # ══════════════════════════════════════════════════════════
 elif page=="📈 Evaluation":
