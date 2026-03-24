@@ -141,6 +141,9 @@ UPI_NOTE       = "DataMindAI Premium 1 Month"
 RAZORPAY_KEY_ID     = "rzp_live_XXXXXXXXXXXXXXXX"   # ← replace
 RAZORPAY_KEY_SECRET = "XXXXXXXXXXXXXXXXXXXXXXXX"    # ← replace
 
+# ── Razorpay Payment Link (direct pay link — no API keys needed) ──────────────
+RAZORPAY_PAYMENT_LINK = "https://razorpay.me/@manikumar2019"
+
 warnings.filterwarnings("ignore")
 N_JOBS = max(1, (os.cpu_count() or 2) - 1)
 
@@ -1133,12 +1136,37 @@ elif st.session_state.auth_page == "payment":
                 '&#9889; Payment is verified automatically — '
                 'Premium activates <strong>instantly</strong> after checkout.</div>',
                 unsafe_allow_html=True)
+
+            # ── Direct Razorpay Payment Link ──────────────────────────────────
+            st.markdown(
+                '<div style="text-align:center;margin:1rem 0;">'
+                '<a href="' + RAZORPAY_PAYMENT_LINK + '" '
+                'target="_blank" rel="noopener noreferrer" '
+                'style="display:inline-block;background:#2563eb;color:#fff;'
+                'font-family:IBM Plex Sans,sans-serif;font-weight:600;font-size:0.92rem;'
+                'padding:0.65rem 2rem;border-radius:8px;text-decoration:none;'
+                'box-shadow:0 2px 8px rgba(37,99,235,.25);letter-spacing:0.01em;">'
+                '&#128179; Pay &#8377;' + str(PLAN_PRICE) + ' via Razorpay'
+                '</a>'
+                '<div style="margin-top:.5rem;font-size:.72rem;color:#64748b;">'
+                'Secure &middot; UPI / Cards / Net Banking accepted'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True)
+
+            st.markdown(
+                '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
+                'padding:.55rem .85rem;font-size:.75rem;color:#92400e;margin:.6rem 0 .4rem;">'
+                '&#9888; After paying, copy your <strong>Transaction / Payment ID</strong> and '
+                'submit it in the <strong>UPI / Manual</strong> tab for activation (within 24 h).'
+                '</div>',
+                unsafe_allow_html=True)
+
             if "rzp_order" not in st.session_state:
                 try:
                     st.session_state.rzp_order = _razorpay_create_order(PLAN_PRICE)
                 except Exception as _e:
                     st.session_state.rzp_order = None
-                    st.warning("Razorpay unavailable: " + str(_e) + ". Use UPI tab instead.")
             _rzp_o = st.session_state.get("rzp_order")
             if _rzp_o and _rzp_o.get("id"):
                 _render_razorpay_button(
@@ -1146,8 +1174,6 @@ elif st.session_state.auth_page == "payment":
                     amount_inr=PLAN_PRICE,
                     user_email=st.session_state.auth_email,
                 )
-            else:
-                st.info("Fill in RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in main.py to enable this.")
 
         with _ptab_upi:
             _qri = _generate_upi_qr()
