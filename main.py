@@ -1017,7 +1017,7 @@ def _left_base(tagline, extra_html=""):
         + extra_html +
         '<div class="al-chips">'
         '<span class="al-chip">Free &middot; 2 Projects</span>'
-        '<span class="al-chip">Premium &middot; &#8377;300/mo</span>'
+        '<span class="al-chip">Premium &middot; &#8377;1000/mo</span>'
         '<span class="al-chip">Firebase Auth</span>'
         '<span class="al-chip">Realtime DB</span>'
         '</div>'
@@ -1122,7 +1122,7 @@ elif st.session_state.auth_page == "payment":
 
     _pricebox = (
         '<div class="al-pricebox">'
-        '<div><span class="amount">&#8377;300</span>'
+        '<div><span class="amount">&#8377;1000</span>'
         '<span class="per">/ month</span></div>'
         '<div class="sub">30 days full access &middot; Renew anytime</div>'
         '</div>'
