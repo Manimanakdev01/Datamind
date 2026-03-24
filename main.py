@@ -5534,15 +5534,38 @@ elif page == "🤖 Auto Labeling":
                 type=["jpg","jpeg","png","webp"],
                 accept_multiple_files=True, key="al_img_up")
             if _uploaded:
-                st.session_state.al_img_files = _uploaded
-                st.markdown(
-                    f'<span class="dm-badge green">{len(_uploaded)} image(s) ready</span>',
-                    unsafe_allow_html=True)
-                _prev_cols = st.columns(min(4, len(_uploaded)))
-                for _i, _f in enumerate(list(_uploaded)[:4]):
-                    _prev_cols[_i].image(_f, caption=_f.name, use_container_width=True)
-                if len(_uploaded) > 4:
-                    st.caption(f"...and {len(_uploaded)-4} more")
+                # Validate each file is a readable image before displaying
+                _valid_files = []
+                _bad_files   = []
+                for _uf in _uploaded:
+                    try:
+                        from PIL import Image as _PILImg
+                        _uf.seek(0)
+                        _PILImg.open(_uf).verify()
+                        _uf.seek(0)
+                        _valid_files.append(_uf)
+                    except Exception:
+                        _uf.seek(0)
+                        _bad_files.append(_uf.name)
+                if _bad_files:
+                    st.warning(f"⚠️ Skipped {len(_bad_files)} unreadable file(s): {', '.join(_bad_files)}")
+                if _valid_files:
+                    st.session_state.al_img_files = _valid_files
+                    st.markdown(
+                        f'<span class="dm-badge green">{len(_valid_files)} valid image(s) ready</span>',
+                        unsafe_allow_html=True)
+                    _prev_cols = st.columns(min(4, len(_valid_files)))
+                    for _i, _f in enumerate(list(_valid_files)[:4]):
+                        try:
+                            _f.seek(0)
+                            _prev_cols[_i].image(_f.read(), caption=_f.name, use_container_width=True)
+                            _f.seek(0)
+                        except Exception:
+                            _prev_cols[_i].warning(f"Cannot preview: {_f.name}")
+                    if len(_valid_files) > 4:
+                        st.caption(f"...and {len(_valid_files)-4} more")
+                else:
+                    st.error("No valid images found. Please upload JPG, PNG or WEBP files.")
             st.markdown('</div>', unsafe_allow_html=True)
 
         # ── IMG TAB 2 CLASSIFY ───────────────────────────────────────────
