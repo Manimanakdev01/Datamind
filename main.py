@@ -1579,7 +1579,8 @@ with st.sidebar:
 
     _nav_pages = [
         "📊 Analysis","🤖 AutoML","📈 Evaluation",
-        "🔬 Rag","🔮 Inference","🔵 Clustering",
+              "🔮 Inference",
+        "🔬 Rag","🔵 Clustering",
         "🧠 Deep Learning","💬 NLP / Text","🤖 Chatbot","🤖 Auto Labeling",
         "💳 Pricing",
     ]
