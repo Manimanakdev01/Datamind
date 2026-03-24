@@ -1006,7 +1006,7 @@ def _left_base(tagline, extra_html=""):
         + extra_html +
         '<div class="al-chips">'
         '<span class="al-chip">Free &middot; 2 Projects</span>'
-        '<span class="al-chip">Premium &middot; &#8377;300/mo</span>'
+        '<span class="al-chip">Premium &middot; &#8377;1000/mo</span>'
         '<span class="al-chip">Firebase Auth</span>'
         '<span class="al-chip">Realtime DB</span>'
         '</div>'
@@ -1111,7 +1111,7 @@ elif st.session_state.auth_page == "payment":
 
     _pricebox = (
         '<div class="al-pricebox">'
-        '<div><span class="amount">&#8377;300</span>'
+        '<div><span class="amount">&#8377;1000</span>'
         '<span class="per">/ month</span></div>'
         '<div class="sub">30 days full access &middot; Renew anytime</div>'
         '</div>'
@@ -1263,7 +1263,7 @@ with st.sidebar:
             '⏳ Payment under review. You will be upgraded within 24 hours.</div>',
             unsafe_allow_html=True)
     elif st.session_state.auth_plan == "free":
-        if st.button("⬆️ Upgrade ₹300/mo", use_container_width=True, key="sb_upgrade"):
+        if st.button("⬆️ Upgrade ₹1000/mo", use_container_width=True, key="sb_upgrade"):
             st.session_state.auth_page = "payment"
             st.rerun()
 
@@ -1459,7 +1459,7 @@ elif page=="🤖 AutoML":
         if st.session_state.auth_plan == "free" and st.session_state.auth_proj_used >= PLAN_FREE_PROJ:
             st.warning(
                 f"You have used all {PLAN_FREE_PROJ} free projects. "
-                "Upgrade to Premium (₹300/month) for unlimited projects.")
+                "Upgrade to Premium (₹1000/month) for unlimited projects.")
             if st.button("⬆️ Upgrade Now", key="automl_upgrade_btn"):
                 st.session_state.auth_page = "payment"
                 st.rerun()
@@ -3231,7 +3231,7 @@ elif page == "💳 Pricing":
 
     # ── Payment section — only show to free users ────────────────────────
     if not _is_premium and not _is_pending:
-        st.markdown("### Upgrade Now — ₹300/month")
+        st.markdown("### Upgrade Now — ₹1000/month")
 
         # Check for Razorpay callback on this page too
         if _check_razorpay_callback():
@@ -3318,7 +3318,7 @@ elif page == "💳 Pricing":
 
     elif _is_premium:
         st.success("You are on the Premium plan. Enjoy unlimited access!")
-        if st.button("Renew Premium (₹300)", key="pricing_renew"):
+        if st.button("Renew Premium (₹1000)", key="pricing_renew"):
             st.session_state.pop("rzp_order", None)
             st.session_state.pop("rzp_order_pricing", None)
             st.session_state.auth_page = "payment"
