@@ -1017,7 +1017,7 @@ def _left_base(tagline, extra_html=""):
         + extra_html +
         '<div class="al-chips">'
         '<span class="al-chip">Free &middot; 2 Projects</span>'
-        '<span class="al-chip">Premium &middot; &#8377;1000/mo</span>'
+        '<span class="al-chip">Premium &middot; &#8377;300/mo</span>'
         '<span class="al-chip">Firebase Auth</span>'
         '<span class="al-chip">Realtime DB</span>'
         '</div>'
@@ -1122,7 +1122,7 @@ elif st.session_state.auth_page == "payment":
 
     _pricebox = (
         '<div class="al-pricebox">'
-        '<div><span class="amount">&#8377;1000</span>'
+        '<div><span class="amount">&#8377;300</span>'
         '<span class="per">/ month</span></div>'
         '<div class="sub">30 days full access &middot; Renew anytime</div>'
         '</div>'
@@ -1590,18 +1590,33 @@ elif page=="📈 Evaluation":
 
 # ══════════════════════════════════════════════════════════
 #  PAGRag
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
 elif page=="🔬 Rag":
     st.markdown("""<div class="dm-pagehead"><div class="icon">🔬</div>
     <div><div class="title">RAG — Retrieval-Augmented Generation</div>
-    <div class="sub">Upload documents · Name your project · Query with semantic search</div></div></div>""",
+    <div class="sub">Upload documents · FAISS semantic search · Powered by Facebook AI</div></div></div>""",
     unsafe_allow_html=True)
 
     # ── session state ──
     for _k, _v in [("rag_chunks",[]),("rag_sources",[]),("rag_vectorizer",None),
                    ("rag_matrix",None),("rag_built",False),("rag_project","My Project"),
-                   ("rag_projects",{})]:
+                   ("rag_projects",{}),("rag_faiss_index",None),("rag_embeddings",None),
+                   ("rag_use_faiss",False)]:
         if _k not in st.session_state: st.session_state[_k] = _v
+
+    # ── FAISS availability check ──
+    FAISS_OK = False
+    ST_OK    = False
+    try:
+        import faiss as _faiss_mod
+        FAISS_OK = True
+    except ImportError:
+        pass
+    try:
+        from sentence_transformers import SentenceTransformer as _STE
+        ST_OK = True
+    except ImportError:
+        pass
 
     # ── helpers ──
     def _chunk_text(text, source, chunk_size=300, overlap=50):
@@ -1639,6 +1654,56 @@ elif page=="🔬 Rag":
                     return ""
         return ""
 
+    @st.cache_resource(show_spinner="Loading sentence-transformers model…")
+    def _load_st_model():
+        from sentence_transformers import SentenceTransformer
+        return SentenceTransformer("all-MiniLM-L6-v2")
+
+    def _build_faiss_index(chunks):
+        import faiss, numpy as _np
+        model = _load_st_model()
+        embeddings = model.encode(chunks, show_progress_bar=False,
+                                  batch_size=64, convert_to_numpy=True)
+        embeddings = embeddings.astype("float32")
+        faiss.normalize_L2(embeddings)
+        index = faiss.IndexFlatIP(embeddings.shape[1])   # Inner product = cosine on normalised vecs
+        index.add(embeddings)
+        return index, embeddings
+
+    def _faiss_query(query, index, chunks, sources, top_k=5, min_score=0.2):
+        import faiss, numpy as _np
+        model = _load_st_model()
+        q_emb = model.encode([query], convert_to_numpy=True).astype("float32")
+        faiss.normalize_L2(q_emb)
+        scores, indices = index.search(q_emb, min(top_k, len(chunks)))
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and float(score) >= min_score:
+                results.append((idx, float(score), chunks[idx], sources[idx]))
+        return results
+
+    # ════════════════════════════════════════════
+    #  Engine status banner
+    # ════════════════════════════════════════════
+    if FAISS_OK and ST_OK:
+        st.markdown(
+            '<div style="background:#d1fae5;border:1px solid #6ee7b7;border-radius:8px;'
+            'padding:.55rem 1rem;font-size:.8rem;color:#065f46;margin-bottom:.75rem;'
+            'display:flex;align-items:center;gap:.5rem;">'
+            '<strong>⚡ FAISS (Facebook AI)</strong> · Semantic vector search active '
+            '· all-MiniLM-L6-v2 embeddings</div>',
+            unsafe_allow_html=True)
+    elif not FAISS_OK or not ST_OK:
+        missing = []
+        if not FAISS_OK: missing.append("`pip install faiss-cpu`")
+        if not ST_OK:    missing.append("`pip install sentence-transformers`")
+        st.markdown(
+            '<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;'
+            'padding:.55rem 1rem;font-size:.8rem;color:#92400e;margin-bottom:.75rem;">'
+            '⚠️ FAISS not available — using TF-IDF fallback. Install: '
+            + " · ".join(missing) + '</div>',
+            unsafe_allow_html=True)
+
     # ════════════════════════════════════════════
     #  TOP — Project name bar
     # ════════════════════════════════════════════
@@ -1653,10 +1718,13 @@ elif page=="🔬 Rag":
         if st.button("💾 Save Project", key="rag_save_proj", use_container_width=True):
             if st.session_state.rag_built and project_name.strip():
                 st.session_state.rag_projects[project_name] = {
-                    "chunks":  st.session_state.rag_chunks,
-                    "sources": st.session_state.rag_sources,
-                    "vectorizer": st.session_state.rag_vectorizer,
-                    "matrix":  st.session_state.rag_matrix,
+                    "chunks":       st.session_state.rag_chunks,
+                    "sources":      st.session_state.rag_sources,
+                    "vectorizer":   st.session_state.rag_vectorizer,
+                    "matrix":       st.session_state.rag_matrix,
+                    "faiss_index":  st.session_state.rag_faiss_index,
+                    "embeddings":   st.session_state.rag_embeddings,
+                    "use_faiss":    st.session_state.rag_use_faiss,
                 }
                 st.session_state.rag_project = project_name
                 st.success(f"✅ Saved as **{project_name}**")
@@ -1669,19 +1737,28 @@ elif page=="🔬 Rag":
                                     key="rag_load_sel", label_visibility="collapsed")
             if load_sel != "— select —":
                 proj = st.session_state.rag_projects[load_sel]
-                st.session_state.rag_chunks     = proj["chunks"]
-                st.session_state.rag_sources    = proj["sources"]
-                st.session_state.rag_vectorizer = proj["vectorizer"]
-                st.session_state.rag_matrix     = proj["matrix"]
-                st.session_state.rag_built      = True
-                st.session_state.rag_project    = load_sel
+                st.session_state.rag_chunks       = proj["chunks"]
+                st.session_state.rag_sources      = proj["sources"]
+                st.session_state.rag_vectorizer   = proj.get("vectorizer")
+                st.session_state.rag_matrix       = proj.get("matrix")
+                st.session_state.rag_faiss_index  = proj.get("faiss_index")
+                st.session_state.rag_embeddings   = proj.get("embeddings")
+                st.session_state.rag_use_faiss    = proj.get("use_faiss", False)
+                st.session_state.rag_built        = True
+                st.session_state.rag_project      = load_sel
                 st.rerun()
 
     if st.session_state.rag_built:
+        engine_badge = (
+            '<span class="dm-badge green">⚡ FAISS</span>'
+            if st.session_state.rag_use_faiss
+            else '<span class="dm-badge gold">📊 TF-IDF</span>'
+        )
         st.markdown(
             f'<span class="dm-badge green">🟢 Active: <strong>{st.session_state.rag_project}</strong> · '
             f'{len(st.session_state.rag_chunks)} chunks · '
-            f'{len(set(st.session_state.rag_sources))} file(s)</span>',
+            f'{len(set(st.session_state.rag_sources))} file(s)</span> '
+            + engine_badge,
             unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1690,17 +1767,15 @@ elif page=="🔬 Rag":
     # ════════════════════════════════════════════
     rag_left, rag_right = st.columns([1, 1], gap="large")
 
-    # ── LEFT: Build ──────────────────────────────
+    # ── LEFT: Build ────────────────────────────────────────────
     with rag_left:
         st.markdown("### 📂 Build Knowledge Base")
         st.markdown('<div class="dm-card"><div class="dm-card-title">Upload Documents</div>',
                     unsafe_allow_html=True)
-
         rag_files = st.file_uploader(
             "Upload TXT, MD, CSV or PDF files",
             type=["txt","md","csv","pdf"],
             accept_multiple_files=True, key="rag_upload")
-
         rc1, rc2 = st.columns(2)
         with rc1: chunk_size    = st.slider("Chunk size (words)",  50, 600, 300, 50, key="rag_cs")
         with rc2: chunk_overlap = st.slider("Overlap (words)",      0, 100,  50, 10, key="rag_ov")
@@ -1723,58 +1798,75 @@ elif page=="🔬 Rag":
                     if not all_chunks:
                         st.error("No text extracted. Please upload readable files.")
                     else:
-                        from sklearn.feature_extraction.text import TfidfVectorizer as _TV
-                        _vec = _TV(max_features=15000, ngram_range=(1,2),
-                                   strip_accents="unicode", sublinear_tf=True)
-                        _mat = _vec.fit_transform(all_chunks)
-                        st.session_state.rag_chunks     = all_chunks
-                        st.session_state.rag_sources    = all_sources
-                        st.session_state.rag_vectorizer = _vec
-                        st.session_state.rag_matrix     = _mat
-                        st.session_state.rag_built      = True
-                        st.session_state.rag_project    = project_name or "Untitled Project"
-                        st.success(f"✅ {len(all_chunks)} chunks indexed from {len(rag_files)} file(s)!")
+                        faiss_built = False
+                        if FAISS_OK and ST_OK:
+                            try:
+                                with st.spinner("⚡ Building FAISS index with sentence embeddings…"):
+                                    _fidx, _femb = _build_faiss_index(all_chunks)
+                                st.session_state.rag_faiss_index = _fidx
+                                st.session_state.rag_embeddings  = _femb
+                                st.session_state.rag_use_faiss   = True
+                                faiss_built = True
+                                st.success(f"✅ FAISS index built — {len(all_chunks)} chunks indexed!")
+                            except Exception as _fe:
+                                st.warning(f"FAISS failed ({_fe}), falling back to TF-IDF.")
+
+                        if not faiss_built:
+                            from sklearn.feature_extraction.text import TfidfVectorizer as _TV
+                            _vec = _TV(max_features=15000, ngram_range=(1,2),
+                                       strip_accents="unicode", sublinear_tf=True)
+                            _mat = _vec.fit_transform(all_chunks)
+                            st.session_state.rag_vectorizer  = _vec
+                            st.session_state.rag_matrix      = _mat
+                            st.session_state.rag_use_faiss   = False
+                            st.session_state.rag_faiss_index = None
+                            st.success(f"✅ TF-IDF index built — {len(all_chunks)} chunks indexed!")
+
+                        st.session_state.rag_chunks  = all_chunks
+                        st.session_state.rag_sources = all_sources
+                        st.session_state.rag_built   = True
+                        st.session_state.rag_project = project_name or "Untitled Project"
                         st.rerun()
 
         if st.session_state.rag_built:
             st.markdown("<div class='dm-divider'></div>", unsafe_allow_html=True)
             unique_src = list(dict.fromkeys(st.session_state.rag_sources))
-            ks1, ks2 = st.columns(2)
+            ks1, ks2, ks3 = st.columns(3)
             ks1.markdown(f'<div class="dm-kpi green"><div class="val">'
                          f'{len(st.session_state.rag_chunks)}</div>'
                          f'<div class="lbl">Total Chunks</div></div>', unsafe_allow_html=True)
             ks2.markdown(f'<div class="dm-kpi gold"><div class="val">{len(unique_src)}</div>'
                          f'<div class="lbl">Documents</div></div>', unsafe_allow_html=True)
-
+            engine_lbl = "⚡ FAISS" if st.session_state.rag_use_faiss else "📊 TF-IDF"
+            ks3.markdown(f'<div class="dm-kpi"><div class="val" style="font-size:1rem">{engine_lbl}</div>'
+                         f'<div class="lbl">Search Engine</div></div>', unsafe_allow_html=True)
             st.markdown("**Indexed files:**")
             for s in unique_src:
                 cnt = st.session_state.rag_sources.count(s)
                 st.markdown(f'<span class="dm-badge grey">📄 {s} &nbsp;({cnt} chunks)</span> ',
                             unsafe_allow_html=True)
-
             if st.button("🗑 Clear KB", key="rag_clear", use_container_width=True):
                 for _k in ["rag_chunks","rag_sources"]:
                     st.session_state[_k] = []
-                st.session_state.rag_vectorizer = None
-                st.session_state.rag_matrix     = None
+                for _k in ["rag_vectorizer","rag_matrix","rag_faiss_index","rag_embeddings"]:
+                    st.session_state[_k] = None
                 st.session_state.rag_built      = False
+                st.session_state.rag_use_faiss  = False
                 st.rerun()
         else:
             st.markdown('<div class="dm-upload"><div class="uicon">📚</div>'
                         '<div class="hint">Upload files then click Build</div></div>',
                         unsafe_allow_html=True)
 
-    # ── RIGHT: Query ─────────────────────────────
+    # ── RIGHT: Query ─────────────────────────────────────────
     with rag_right:
         st.markdown("### 🔍 Query")
 
         if not st.session_state.rag_built:
             st.info("Build a knowledge base first on the left.")
         else:
-            from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
-
             top_k     = st.slider("Top-K results",       1, 10,  3, key="rag_topk")
-            min_score = st.slider("Min relevance score", 0.0, 1.0, 0.05, 0.01, key="rag_minscore")
+            min_score = st.slider("Min relevance score", 0.0, 1.0, 0.2 if st.session_state.rag_use_faiss else 0.05, 0.01, key="rag_minscore")
 
             query = st.text_area("💬 Your question",
                                  placeholder="e.g. What is the main conclusion of this document?",
@@ -1783,45 +1875,91 @@ elif page=="🔬 Rag":
             if st.button("🔎 Search", key="rag_search", use_container_width=True) and query.strip():
                 with st.spinner("Retrieving…"):
                     try:
-                        q_vec  = st.session_state.rag_vectorizer.transform([query])
-                        scores = _cos_sim(q_vec, st.session_state.rag_matrix)[0]
-                        ranked = np.argsort(scores)[::-1]
-                        top_idx = [i for i in ranked if scores[i] >= min_score][:top_k]
-
-                        if not top_idx:
-                            st.warning("No chunks above the threshold. Lower the Min score.")
-                        else:
-                            st.markdown(f"**{len(top_idx)} result(s) found:**")
-                            q_words = set(query.lower().split())
-                            for rank, idx in enumerate(top_idx, 1):
-                                chunk_text = st.session_state.rag_chunks[idx]
-                                src        = st.session_state.rag_sources[idx]
-                                score_val  = float(scores[idx])
-                                badge_col  = "green" if score_val > 0.3 else "gold" if score_val > 0.1 else "grey"
-                                highlighted = " ".join(
-                                    f"**{w}**" if w.lower().strip(".,;:!?\"'") in q_words else w
-                                    for w in chunk_text.split())
+                        if st.session_state.rag_use_faiss and st.session_state.rag_faiss_index is not None:
+                            # ── FAISS semantic search ──
+                            results = _faiss_query(
+                                query,
+                                st.session_state.rag_faiss_index,
+                                st.session_state.rag_chunks,
+                                st.session_state.rag_sources,
+                                top_k=top_k,
+                                min_score=min_score,
+                            )
+                            if not results:
+                                st.warning("No chunks above the threshold. Lower the Min score.")
+                            else:
                                 st.markdown(
-                                    f'<div class="dm-card" style="border-left:3px solid var(--accent);'
-                                    f'padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
-                                    f'<div style="display:flex;justify-content:space-between;'
-                                    f'margin-bottom:0.4rem">'
-                                    f'<span class="dm-badge {badge_col}">#{rank} · {score_val:.3f}</span>'
-                                    f'<span class="dm-badge grey">📄 {src}</span></div></div>',
+                                    '<div style="background:#d1fae5;border:1px solid #6ee7b7;'
+                                    'border-radius:8px;padding:.4rem .8rem;font-size:.75rem;'
+                                    'color:#065f46;margin-bottom:.6rem;">⚡ FAISS semantic search — '
+                                    + str(len(results)) + ' result(s)</div>',
                                     unsafe_allow_html=True)
-                                st.markdown(highlighted)
-                                st.markdown("---")
+                                for rank, (idx, score_val, chunk_text, src) in enumerate(results, 1):
+                                    badge_col = "green" if score_val > 0.6 else "gold" if score_val > 0.35 else "grey"
+                                    q_words   = set(query.lower().split())
+                                    highlighted = " ".join(
+                                        f"**{w}**" if w.lower().strip(".,;:!?\"'") in q_words else w
+                                        for w in chunk_text.split())
+                                    st.markdown(
+                                        f'<div class="dm-card" style="border-left:3px solid var(--accent);'
+                                        f'padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
+                                        f'<div style="display:flex;justify-content:space-between;'
+                                        f'margin-bottom:0.4rem">'
+                                        f'<span class="dm-badge {badge_col}">#{rank} · {score_val:.3f} cosine</span>'
+                                        f'<span class="dm-badge grey">📄 {src}</span></div></div>',
+                                        unsafe_allow_html=True)
+                                    st.markdown(highlighted)
+                                    st.markdown("---")
 
-                            # score bar chart
-                            top20 = [(i, float(scores[i])) for i in ranked[:20]]
-                            fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
-                            ax_s.bar(range(len(top20)),
-                                     [s for _, s in top20],
-                                     color=[C_BLUE if i in top_idx else "#e5e7eb" for i, _ in top20],
-                                     edgecolor="white")
-                            ax_s.set_xlabel("Chunk rank"); ax_s.set_ylabel("Cosine score")
-                            ax_s.set_title("Retrieval scores (blue = returned)")
-                            fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
+                                # score bar
+                                fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
+                                ax_s.bar(range(len(results)),
+                                         [s for _, s, _, _ in results],
+                                         color=C_BLUE, edgecolor="white")
+                                ax_s.set_xlabel("Result rank")
+                                ax_s.set_ylabel("Cosine similarity")
+                                ax_s.set_title("⚡ FAISS retrieval scores")
+                                fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
+
+                        else:
+                            # ── TF-IDF fallback ──
+                            from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                            q_vec  = st.session_state.rag_vectorizer.transform([query])
+                            scores = _cos_sim(q_vec, st.session_state.rag_matrix)[0]
+                            ranked = np.argsort(scores)[::-1]
+                            top_idx = [i for i in ranked if scores[i] >= min_score][:top_k]
+                            if not top_idx:
+                                st.warning("No chunks above the threshold. Lower the Min score.")
+                            else:
+                                st.markdown(f"**{len(top_idx)} result(s) found (TF-IDF):**")
+                                q_words = set(query.lower().split())
+                                for rank, idx in enumerate(top_idx, 1):
+                                    chunk_text = st.session_state.rag_chunks[idx]
+                                    src        = st.session_state.rag_sources[idx]
+                                    score_val  = float(scores[idx])
+                                    badge_col  = "green" if score_val > 0.3 else "gold" if score_val > 0.1 else "grey"
+                                    highlighted = " ".join(
+                                        f"**{w}**" if w.lower().strip(".,;:!?\"'") in q_words else w
+                                        for w in chunk_text.split())
+                                    st.markdown(
+                                        f'<div class="dm-card" style="border-left:3px solid var(--accent);'
+                                        f'padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
+                                        f'<div style="display:flex;justify-content:space-between;'
+                                        f'margin-bottom:0.4rem">'
+                                        f'<span class="dm-badge {badge_col}">#{rank} · {score_val:.3f}</span>'
+                                        f'<span class="dm-badge grey">📄 {src}</span></div></div>',
+                                        unsafe_allow_html=True)
+                                    st.markdown(highlighted)
+                                    st.markdown("---")
+                                top20 = [(i, float(scores[i])) for i in ranked[:20]]
+                                fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
+                                ax_s.bar(range(len(top20)),
+                                         [s for _, s in top20],
+                                         color=[C_BLUE if i in top_idx else "#e5e7eb" for i, _ in top20],
+                                         edgecolor="white")
+                                ax_s.set_xlabel("Chunk rank"); ax_s.set_ylabel("Cosine score")
+                                ax_s.set_title("TF-IDF retrieval scores (blue = returned)")
+                                fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
 
                     except Exception as exc:
                         st.error(f"Query failed: {exc}")
@@ -1841,7 +1979,6 @@ elif page=="🔬 Rag":
                     st.text(chunk[:250] + ("…" if len(chunk) > 250 else ""))
                     st.markdown("---")
 
-# ══════════════════════════════════════════════════════════
 #  PAGE: INFERENCE
 # ══════════════════════════════════════════════════════════
 elif page=="🔮 Inference":
