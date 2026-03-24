@@ -5,7 +5,7 @@ Features: SHAP explainability · Firebase persistence · TensorFlow CNN/LSTM
           NLP text classification · Intent-based chatbot · Professional UI
 """
 
-import io, os, pickle, warnings, datetime
+import io, os, gc, pickle, warnings, datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -145,6 +145,8 @@ RAZORPAY_KEY_SECRET = "XXXXXXXXXXXXXXXXXXXXXXXX"    # ← replace
 RAZORPAY_PAYMENT_LINK = "https://rzp.io/rzp/rIfAQLe"
 
 warnings.filterwarnings("ignore")
+# Memory optimisation — don't copy on slice, use efficient dtypes
+pd.options.mode.copy_on_write = False
 N_JOBS = max(1, (os.cpu_count() or 2) - 1)
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -212,6 +214,8 @@ button[data-baseweb="tab"][aria-selected="true"]{color:var(--accent)!important;b
 .stAlert{border-radius:var(--radius)!important;font-size:0.82rem!important;}
 </style>""", unsafe_allow_html=True)
 
+# Limit matplotlib memory — close figures aggressively
+plt.rcParams.update({'agg.path.chunksize': 10000})
 plt.rcParams.update({
     "figure.facecolor":"#ffffff","axes.facecolor":"#ffffff",
     "axes.edgecolor":"#e2e6ea","axes.labelcolor":"#374151",
@@ -725,7 +729,7 @@ def _check_razorpay_callback():
 # ════════════════════════════════════════════════════════════════════════════
 #  UTILITIES
 # ════════════════════════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def load_csv(b):
     return pd.read_csv(io.BytesIO(b))
 
@@ -748,7 +752,7 @@ def feature_engineering(df):
             if df[col].skew()>1 and df[col].min()>=0: df[col]=np.log1p(df[col])
     return df.fillna(df.median(numeric_only=True)), encoders
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def cached_feature_engineering(b):
     return feature_engineering(load_csv(b))
 
@@ -803,7 +807,7 @@ def compute_shap(model, X_train, X_test, features):
         return np.array(sv)
     except: return None
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_shap_bar(sv_b,feat_b,feature_names):
     sv=np.frombuffer(sv_b,dtype=np.float64).reshape(-1,len(feature_names))
     ma=np.abs(sv).mean(axis=0); idx=np.argsort(ma)[-15:]
@@ -815,7 +819,7 @@ def _plot_shap_bar(sv_b,feat_b,feature_names):
     ax.set_xlim(0,ma[idx].max()*1.18); fig.tight_layout()
     d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_shap_beeswarm(sv_b,X_b,feature_names):
     sv=np.frombuffer(sv_b,dtype=np.float64).reshape(-1,len(feature_names))
     X =np.frombuffer(X_b, dtype=np.float64).reshape(-1,len(feature_names))
@@ -835,7 +839,7 @@ def _plot_shap_beeswarm(sv_b,X_b,feature_names):
 # ══════════════════════════════════════════════════════════
 #  CACHED EVAL PLOTS
 # ══════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_cm(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -844,7 +848,7 @@ def _plot_cm(yt,yp):
     ax.set_xlabel("Predicted"); ax.set_ylabel("Actual"); ax.set_title("Confusion Matrix")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_roc(yt,pb):
     y1=np.frombuffer(yt,dtype=np.float64); p=np.frombuffer(pb,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -852,7 +856,7 @@ def _plot_roc(yt,pb):
     ax.plot([0,1],[0,1],"--",color="#9ca3af",lw=1); ax.set_title("ROC Curve")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_cal(yt,pb):
     y1=np.frombuffer(yt,dtype=np.float64); p=np.frombuffer(pb,dtype=np.float64)
     fp,mp=calibration_curve(y1,p,n_bins=10)
@@ -863,7 +867,7 @@ def _plot_cal(yt,pb):
     ax.set_title("Calibration Curve"); ax.legend()
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_res(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     res=y1-y2
@@ -876,7 +880,7 @@ def _plot_res(yt,yp):
     axes[1].set_title("Residual Distribution")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
 def _plot_avp(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -885,6 +889,23 @@ def _plot_avp(yt,yp):
     ax.plot([mn,mx],[mn,mx],"--",color=C_GOLD,lw=1.5)
     ax.set_xlabel("Actual"); ax.set_ylabel("Predicted"); ax.set_title("Actual vs Predicted")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
+
+
+# ══════════════════════════════════════════════════════════
+#  CACHED HEAVY MODELS (cache_resource keeps ONE instance)
+# ══════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner="Loading embedding model…")
+def _load_st_model():
+    """Sentence-transformer loaded once and shared across all sessions."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+@st.cache_resource(show_spinner=False)
+def _get_tfidf_vectorizer(max_features=15000):
+    """Return a fresh TfidfVectorizer — cached as a factory."""
+    from sklearn.feature_extraction.text import TfidfVectorizer as _TV
+    return _TV(max_features=max_features, ngram_range=(1,2),
+               strip_accents="unicode", sublinear_tf=True)
 
 # ════════════════════════════════════════════════════════════════════════════
 #  AUTH WALL
@@ -1861,7 +1882,7 @@ if page=="📊 Analysis":
             with _cr2: _corr_thresh = st.slider("Highlight |corr| ≥", 0.0, 1.0, 0.7, 0.05, key="corr_thr")
             with _cr3: _corr_mask   = st.checkbox("Mask upper triangle", value=True, key="corr_mask")
 
-            @st.cache_data(show_spinner=False)
+            @st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
             def _corr_cached(b, method): return load_csv(b).select_dtypes(include=np.number).corr(method=method)
             corr = _corr_cached(fb, _corr_method)
 
@@ -2505,6 +2526,7 @@ elif page=="🤖 AutoML":
 
             st.session_state.update(model=pipeline, features=features, train_df=X,
                                     y_test=y_test, preds=preds, proba=proba)
+            gc.collect()
 
             record = {"model":model_name,"problem":problem,"score":round(score,4),
                       "train_score":round(train_score,4),"cv_mean":round(cv_scores.mean(),4),
@@ -3005,10 +3027,7 @@ elif page=="🔬 Rag":
                     return ""
         return ""
 
-    @st.cache_resource(show_spinner="Loading sentence-transformers model…")
-    def _load_st_model():
-        from sentence_transformers import SentenceTransformer
-        return SentenceTransformer("all-MiniLM-L6-v2")
+    # _load_st_model defined at module level below
 
     def _build_faiss_index(chunks):
         import faiss, numpy as _np
@@ -3159,6 +3178,7 @@ elif page=="🔬 Rag":
                                 st.session_state.rag_use_faiss   = True
                                 faiss_built = True
                                 st.success(f"✅ FAISS index built — {len(all_chunks)} chunks indexed!")
+                                gc.collect()
                             except Exception as _fe:
                                 st.warning(f"FAISS failed ({_fe}), falling back to TF-IDF.")
 
@@ -4506,6 +4526,7 @@ elif page == "🤖 Chatbot":
                         st.session_state.chatbot_classes      = le_cb.classes_.tolist()
                         # store training inputs + raw Q->A map for cosine fallback
                         st.session_state.chatbot_train_inputs = cb_work["_input"].tolist()
+                        gc.collect()
                         st.session_state.chatbot_train_answers= cb_work["_output"].tolist()
                         st.session_state.chatbot_X_train      = X_cb
                         st.session_state.chatbot_has_intent   = (cb_int_col != "— none —")
