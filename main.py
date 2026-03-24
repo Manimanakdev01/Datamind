@@ -2687,35 +2687,46 @@ elif page=="🤖 AutoML":
             if st.session_state.auth_plan=="free" and st.session_state.auth_proj_used>=PLAN_FREE_PROJ:
                 st.warning("Upgrade to Premium to use Auto-Compare."); st.stop()
 
+            # Lightweight models for compare — keep n_estimators low to avoid memory crash
             if problem=="Classification":
                 _all_models = {
-                    "Random Forest":           RandomForestClassifier(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
-                    "Extra Trees":             ExtraTreesClassifier(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
-                    "Hist Gradient Boosting":  HistGradientBoostingClassifier(max_iter=100, random_state=random_seed),
-                    "Gradient Boosting":       GradientBoostingClassifier(n_estimators=100, random_state=random_seed),
-                    "Logistic Regression":     LogisticRegression(max_iter=1000, n_jobs=N_JOBS, solver="saga"),
-                    "Decision Tree":           DecisionTreeClassifier(random_state=random_seed),
-                    "KNN":                     KNeighborsClassifier(n_jobs=N_JOBS),
+                    "Random Forest":          RandomForestClassifier(n_estimators=50, n_jobs=1, random_state=random_seed),
+                    "Extra Trees":            ExtraTreesClassifier(n_estimators=50, n_jobs=1, random_state=random_seed),
+                    "Hist Gradient Boosting": HistGradientBoostingClassifier(max_iter=50, random_state=random_seed),
+                    "Gradient Boosting":      GradientBoostingClassifier(n_estimators=50, random_state=random_seed),
+                    "Logistic Regression":    LogisticRegression(max_iter=500, solver="saga"),
+                    "Decision Tree":          DecisionTreeClassifier(random_state=random_seed, max_depth=10),
+                    "KNN":                    KNeighborsClassifier(n_neighbors=5),
                 }
             else:
                 _all_models = {
-                    "Random Forest":           RandomForestRegressor(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
-                    "Extra Trees":             ExtraTreesRegressor(n_estimators=100, n_jobs=N_JOBS, random_state=random_seed),
-                    "Hist Gradient Boosting":  HistGradientBoostingRegressor(max_iter=100, random_state=random_seed),
-                    "Gradient Boosting":       GradientBoostingRegressor(n_estimators=100, random_state=random_seed),
-                    "Linear Regression":       LinearRegression(n_jobs=N_JOBS),
-                    "Ridge":                   Ridge(),
-                    "Lasso":                   Lasso(),
-                    "Decision Tree":           DecisionTreeRegressor(random_state=random_seed),
+                    "Random Forest":          RandomForestRegressor(n_estimators=50, n_jobs=1, random_state=random_seed),
+                    "Extra Trees":            ExtraTreesRegressor(n_estimators=50, n_jobs=1, random_state=random_seed),
+                    "Hist Gradient Boosting": HistGradientBoostingRegressor(max_iter=50, random_state=random_seed),
+                    "Gradient Boosting":      GradientBoostingRegressor(n_estimators=50, random_state=random_seed),
+                    "Linear Regression":      LinearRegression(),
+                    "Ridge":                  Ridge(),
+                    "Lasso":                  Lasso(max_iter=1000),
+                    "Decision Tree":          DecisionTreeRegressor(random_state=random_seed, max_depth=10),
                 }
 
-            strat = y if (problem=="Classification" and y.nunique()>1) else None
-            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, random_state=random_seed, stratify=strat)
+            try:
+                strat = y if (problem=="Classification" and y.nunique()>1 and y.nunique()<=20) else None
+                X_tr, X_te, y_tr, y_te = train_test_split(
+                    X, y, test_size=test_size, random_state=random_seed, stratify=strat)
+            except Exception as _spl_err:
+                st.error(f"Train/test split failed: {_spl_err}"); st.stop()
+
             _scoring = "accuracy" if problem=="Classification" else "r2"
             _results = []
+            _errors  = []
             _prog = st.progress(0, text="Comparing models…")
+            _status = st.empty()
+
             for _mi, (_mn, _mo) in enumerate(_all_models.items()):
-                _prog.progress((_mi+1)/len(_all_models), text=f"Training {_mn}…")
+                _pct = (_mi+1)/len(_all_models)
+                _prog.progress(_pct, text=f"Training {_mn} ({_mi+1}/{len(_all_models)})…")
+                _status.markdown(f'<span class="dm-badge blue">⏳ {_mn}…</span>', unsafe_allow_html=True)
                 try:
                     _steps = [("imputer", SimpleImputer(strategy=_ac_impute))]
                     if _ac_scale: _steps.append(("scaler", StandardScaler()))
@@ -2724,34 +2735,65 @@ elif page=="🤖 AutoML":
                     _t0 = _time.time()
                     _pl.fit(X_tr, y_tr)
                     _pr = _pl.predict(X_te)
-                    _s  = accuracy_score(y_te,_pr) if problem=="Classification" else r2_score(y_te,_pr)
-                    _cv = cross_val_score(_pl, X, y, cv=3, scoring=_scoring, n_jobs=N_JOBS)
+                    _s  = float(accuracy_score(y_te,_pr) if problem=="Classification" else r2_score(y_te,_pr))
+                    # quick 3-fold CV, n_jobs=1 to avoid memory spike
+                    _cv = cross_val_score(_pl, X, y, cv=3, scoring=_scoring, n_jobs=1)
                     _results.append({
-                        "Model": _mn,
+                        "Model":      _mn,
                         "Test Score": round(_s, 4),
-                        "CV Mean": round(_cv.mean(), 4),
-                        "CV Std": round(_cv.std(), 4),
-                        "Time (s)": round(_time.time()-_t0, 2),
+                        "CV Mean":    round(float(_cv.mean()), 4),
+                        "CV Std":     round(float(_cv.std()),  4),
+                        "Time (s)":   round(_time.time()-_t0,  2),
+                        "Status":     "✅ OK",
                     })
+                    del _pl, _pr, _cv  # free immediately
+                    gc.collect()
                 except Exception as _e:
-                    _results.append({"Model":_mn,"Test Score":None,"CV Mean":None,"CV Std":None,"Time (s)":None})
-            _prog.empty()
+                    _errors.append(f"{_mn}: {str(_e)[:80]}")
+                    _results.append({
+                        "Model": _mn, "Test Score": None,
+                        "CV Mean": None, "CV Std": None,
+                        "Time (s)": None, "Status": "❌ Failed",
+                    })
 
-            _res_df = pd.DataFrame(_results).sort_values("Test Score", ascending=False).reset_index(drop=True)
-            _res_df.index += 1
-            _best_row = _res_df.iloc[0]
-            st.success(f"🏆 Best model: **{_best_row['Model']}** — Test Score: **{_best_row['Test Score']}** | CV: {_best_row['CV Mean']} ± {_best_row['CV Std']}")
+            _prog.empty()
+            _status.empty()
+
+            if _errors:
+                with st.expander(f"⚠️ {len(_errors)} model(s) failed — click to see why"):
+                    for _err in _errors:
+                        st.text(_err)
+
+            # Filter to successful models only for ranking
+            _res_df = pd.DataFrame(_results)
+            _ok_df  = _res_df[_res_df["Test Score"].notna()].sort_values("Test Score", ascending=False).reset_index(drop=True)
+            _ok_df.index += 1
+
+            if _ok_df.empty:
+                st.error("❌ All models failed. Check your data for unsupported types or extreme values.")
+                st.stop()
+
+            _best_row = _ok_df.iloc[0]
+            st.success(
+                f"🏆 Best: **{_best_row['Model']}** — "
+                f"Test Score: **{_best_row['Test Score']}** | "
+                f"CV: {_best_row['CV Mean']} ± {_best_row['CV Std']}"
+            )
             st.dataframe(_res_df, use_container_width=True)
 
-            # Bar chart comparison
-            fig_ac, ax_ac = plt.subplots(figsize=(8, 4))
-            _colors_ac = [C_GREEN if i==0 else C_BLUE for i in range(len(_res_df))]
-            bars_ac = ax_ac.barh(_res_df["Model"][::-1], _res_df["Test Score"][::-1],
-                                  color=_colors_ac[::-1], edgecolor="white", alpha=0.85)
-            ax_ac.bar_label(bars_ac, fmt="%.4f", padding=4, fontsize=8)
-            ax_ac.set_title(f"Model Comparison — {_scoring}")
-            ax_ac.set_xlabel(_scoring)
-            fig_ac.tight_layout(); st.pyplot(fig_ac); plt.close(fig_ac)
+            # Bar chart — only show successful models
+            if len(_ok_df) > 0:
+                fig_ac, ax_ac = plt.subplots(figsize=(8, max(3, len(_ok_df)*0.5)))
+                _colors_ac = [C_GREEN if i==0 else C_BLUE for i in range(len(_ok_df))]
+                bars_ac = ax_ac.barh(
+                    _ok_df["Model"].values[::-1],
+                    _ok_df["Test Score"].values[::-1],
+                    color=_colors_ac[::-1], edgecolor="white", alpha=0.85)
+                ax_ac.bar_label(bars_ac, fmt="%.4f", padding=4, fontsize=8)
+                ax_ac.set_title(f"Model Comparison — {_scoring}")
+                ax_ac.set_xlabel(_scoring)
+                fig_ac.tight_layout(); st.pyplot(fig_ac); plt.close(fig_ac)
+            gc.collect()
 
     # ─────────────────────────────────────────────────────
     #  TAB 3: Hyperparameter Tuning
@@ -2928,6 +2970,4631 @@ elif page=="🤖 AutoML":
 
 #  PAGE: EVALUATION
 # ══════════════════════════════════════════════════════════
+elif page=="📈 Evaluation":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">📈</div>
+    <div><div class="title">Model Evaluation</div>
+    <div class="sub">Confusion matrix, ROC, calibration, fairness & residuals</div></div></div>""",
+    unsafe_allow_html=True)
+
+    if not st.session_state.model: st.info("Train a model first in the AutoML page."); st.stop()
+
+    problem=st.session_state.problem; y_test=st.session_state.y_test
+    preds=st.session_state.preds; proba=st.session_state.proba
+    _yt=y_test.values.astype(np.float64).tobytes()
+    _yp=preds.astype(np.float64).tobytes()
+
+    if problem=="Classification":
+        t1,t2,t3,t4=st.tabs(["Confusion Matrix","ROC Curve","Calibration","Fairness"])
+        with t1: st.image(_plot_cm(_yt,_yp))
+        with t2:
+            if proba is not None and y_test.nunique()==2: st.image(_plot_roc(_yt,proba[:,1].astype(np.float64).tobytes()))
+            else: st.info("Requires binary classification with probability support.")
+        with t3:
+            if proba is not None and y_test.nunique()==2: st.image(_plot_cal(_yt,proba[:,1].astype(np.float64).tobytes()))
+            else: st.info("Requires binary classification with probability support.")
+        with t4:
+            fairness=fairness_check(y_test.values,preds)
+            cols=st.columns(len(fairness))
+            for col,(cls,acc) in zip(cols,fairness.items()):
+                c="green" if acc>=0.8 else "gold" if acc>=0.6 else "red"
+                col.markdown(f'<div class="dm-kpi {c}"><div class="val">{acc:.1%}</div><div class="lbl">Class {cls}</div></div>',unsafe_allow_html=True)
+    else:
+        t1,t2=st.tabs(["Residuals","Actual vs Predicted"])
+        with t1: st.image(_plot_res(_yt,_yp))
+        with t2: st.image(_plot_avp(_yt,_yp))
+
+# ══════════════════════════════════════════════════════════
+#  PAGRag
+# ══════════════════════════════════════════════════════
+elif page=="🔬 Rag":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🔬</div>
+    <div><div class="title">RAG — Retrieval-Augmented Generation</div>
+    <div class="sub">Upload documents · FAISS semantic search · Powered by Facebook AI</div></div></div>""",
+    unsafe_allow_html=True)
+
+    # ── session state ──
+    for _k, _v in [("rag_chunks",[]),("rag_sources",[]),("rag_vectorizer",None),
+                   ("rag_matrix",None),("rag_built",False),("rag_project","My Project"),
+                   ("rag_projects",{}),("rag_faiss_index",None),("rag_embeddings",None),
+                   ("rag_use_faiss",False)]:
+        if _k not in st.session_state: st.session_state[_k] = _v
+
+    # ── FAISS availability check ──
+    FAISS_OK = False
+    ST_OK    = False
+    try:
+        import faiss as _faiss_mod
+        FAISS_OK = True
+    except ImportError:
+        pass
+    try:
+        from sentence_transformers import SentenceTransformer as _STE
+        ST_OK = True
+    except ImportError:
+        pass
+
+    # ── helpers ──
+    def _chunk_text(text, source, chunk_size=300, overlap=50):
+        words = text.split()
+        chunks, sources = [], []
+        step = max(1, chunk_size - overlap)
+        for i in range(0, max(1, len(words) - overlap), step):
+            chunk = " ".join(words[i:i + chunk_size])
+            if chunk.strip():
+                chunks.append(chunk); sources.append(source)
+        return chunks, sources
+
+    def _extract_text(file_obj, filename):
+        ext = filename.rsplit(".", 1)[-1].lower()
+        if ext in ("txt", "md"):
+            return file_obj.read().decode("utf-8", errors="ignore")
+        elif ext == "csv":
+            df_r = pd.read_csv(file_obj)
+            return " ".join(df_r.astype(str).apply(lambda r: " ".join(r), axis=1).tolist())
+        elif ext == "pdf":
+            try:
+                import pdfplumber
+                parts = []
+                with pdfplumber.open(file_obj) as pdf:
+                    for pg in pdf.pages:
+                        t = pg.extract_text()
+                        if t: parts.append(t)
+                return "\n".join(parts)
+            except ImportError:
+                try:
+                    import PyPDF2
+                    reader = PyPDF2.PdfReader(file_obj)
+                    return "\n".join(p.extract_text() or "" for p in reader.pages)
+                except ImportError:
+                    return ""
+        return ""
+
+    # _load_st_model defined at module level below
+
+    def _build_faiss_index(chunks):
+        import faiss, numpy as _np
+        model = _load_st_model()
+        embeddings = model.encode(chunks, show_progress_bar=False,
+                                  batch_size=64, convert_to_numpy=True)
+        embeddings = embeddings.astype("float32")
+        faiss.normalize_L2(embeddings)
+        index = faiss.IndexFlatIP(embeddings.shape[1])   # Inner product = cosine on normalised vecs
+        index.add(embeddings)
+        return index, embeddings
+
+    def _faiss_query(query, index, chunks, sources, top_k=5, min_score=0.2):
+        import faiss, numpy as _np
+        model = _load_st_model()
+        q_emb = model.encode([query], convert_to_numpy=True).astype("float32")
+        faiss.normalize_L2(q_emb)
+        scores, indices = index.search(q_emb, min(top_k, len(chunks)))
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0 and float(score) >= min_score:
+                results.append((idx, float(score), chunks[idx], sources[idx]))
+        return results
+
+    # ════════════════════════════════════════════
+    #  Engine status banner
+    # ════════════════════════════════════════════
+    if FAISS_OK and ST_OK:
+        st.markdown(
+            '<div style="background:#d1fae5;border:1px solid #6ee7b7;border-radius:8px;'
+            'padding:.55rem 1rem;font-size:.8rem;color:#065f46;margin-bottom:.75rem;'
+            'display:flex;align-items:center;gap:.5rem;">'
+            '<strong>⚡ FAISS (Facebook AI)</strong> · Semantic vector search active '
+            '· all-MiniLM-L6-v2 embeddings</div>',
+            unsafe_allow_html=True)
+    elif not FAISS_OK or not ST_OK:
+        missing = []
+        if not FAISS_OK: missing.append("`pip install faiss-cpu`")
+        if not ST_OK:    missing.append("`pip install sentence-transformers`")
+        st.markdown(
+            '<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;'
+            'padding:.55rem 1rem;font-size:.8rem;color:#92400e;margin-bottom:.75rem;">'
+            '⚠️ FAISS not available — using TF-IDF fallback. Install: '
+            + " · ".join(missing) + '</div>',
+            unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════
+    #  TOP — Project name bar
+    # ════════════════════════════════════════════
+    st.markdown('<div class="dm-card"><div class="dm-card-title">📁 Project</div>',
+                unsafe_allow_html=True)
+    pj1, pj2, pj3 = st.columns([3, 1, 1])
+    with pj1:
+        project_name = st.text_input("Project name", value=st.session_state.rag_project,
+                                     placeholder="e.g. Legal Docs, Research Papers…",
+                                     key="rag_proj_input", label_visibility="collapsed")
+    with pj2:
+        if st.button("💾 Save Project", key="rag_save_proj", use_container_width=True):
+            if st.session_state.rag_built and project_name.strip():
+                st.session_state.rag_projects[project_name] = {
+                    "chunks":       st.session_state.rag_chunks,
+                    "sources":      st.session_state.rag_sources,
+                    "vectorizer":   st.session_state.rag_vectorizer,
+                    "matrix":       st.session_state.rag_matrix,
+                    "faiss_index":  st.session_state.rag_faiss_index,
+                    "embeddings":   st.session_state.rag_embeddings,
+                    "use_faiss":    st.session_state.rag_use_faiss,
+                }
+                st.session_state.rag_project = project_name
+                st.success(f"✅ Saved as **{project_name}**")
+            else:
+                st.warning("Build a knowledge base first, then save.")
+    with pj3:
+        saved_names = list(st.session_state.rag_projects.keys())
+        if saved_names:
+            load_sel = st.selectbox("Load saved", ["— select —"] + saved_names,
+                                    key="rag_load_sel", label_visibility="collapsed")
+            if load_sel != "— select —":
+                proj = st.session_state.rag_projects[load_sel]
+                st.session_state.rag_chunks       = proj["chunks"]
+                st.session_state.rag_sources      = proj["sources"]
+                st.session_state.rag_vectorizer   = proj.get("vectorizer")
+                st.session_state.rag_matrix       = proj.get("matrix")
+                st.session_state.rag_faiss_index  = proj.get("faiss_index")
+                st.session_state.rag_embeddings   = proj.get("embeddings")
+                st.session_state.rag_use_faiss    = proj.get("use_faiss", False)
+                st.session_state.rag_built        = True
+                st.session_state.rag_project      = load_sel
+                st.rerun()
+
+    if st.session_state.rag_built:
+        engine_badge = (
+            '<span class="dm-badge green">⚡ FAISS</span>'
+            if st.session_state.rag_use_faiss
+            else '<span class="dm-badge gold">📊 TF-IDF</span>'
+        )
+        st.markdown(
+            f'<span class="dm-badge green">🟢 Active: <strong>{st.session_state.rag_project}</strong> · '
+            f'{len(st.session_state.rag_chunks)} chunks · '
+            f'{len(set(st.session_state.rag_sources))} file(s)</span> '
+            + engine_badge,
+            unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════
+    #  TWO COLUMNS — Build  |  Query
+    # ════════════════════════════════════════════
+    rag_left, rag_right = st.columns([1, 1], gap="large")
+
+    # ── LEFT: Build ────────────────────────────────────────────
+    with rag_left:
+        st.markdown("### 📂 Build Knowledge Base")
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Upload Documents</div>',
+                    unsafe_allow_html=True)
+        rag_files = st.file_uploader(
+            "Upload TXT, MD, CSV or PDF files",
+            type=["txt","md","csv","pdf"],
+            accept_multiple_files=True, key="rag_upload")
+        rc1, rc2 = st.columns(2)
+        with rc1: chunk_size    = st.slider("Chunk size (words)",  50, 600, 300, 50, key="rag_cs")
+        with rc2: chunk_overlap = st.slider("Overlap (words)",      0, 100,  50, 10, key="rag_ov")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if rag_files:
+            st.markdown(f'<span class="dm-badge blue">📄 {len(rag_files)} file(s) ready</span>',
+                        unsafe_allow_html=True)
+            if st.button("🔨 Build Knowledge Base", key="rag_build", use_container_width=True):
+                with st.spinner("Parsing and indexing…"):
+                    all_chunks, all_sources, errors = [], [], []
+                    for f in rag_files:
+                        raw = _extract_text(f, f.name)
+                        if not raw.strip(): errors.append(f.name); continue
+                        ch, sr = _chunk_text(raw, f.name, chunk_size, chunk_overlap)
+                        all_chunks.extend(ch); all_sources.extend(sr)
+                    if errors:
+                        st.warning(f"⚠️ No text from: {', '.join(errors)}. "
+                                   "For PDFs: `pip install pdfplumber`")
+                    if not all_chunks:
+                        st.error("No text extracted. Please upload readable files.")
+                    else:
+                        faiss_built = False
+                        if FAISS_OK and ST_OK:
+                            try:
+                                with st.spinner("⚡ Building FAISS index with sentence embeddings…"):
+                                    _fidx, _femb = _build_faiss_index(all_chunks)
+                                st.session_state.rag_faiss_index = _fidx
+                                st.session_state.rag_embeddings  = _femb
+                                st.session_state.rag_use_faiss   = True
+                                faiss_built = True
+                                st.success(f"✅ FAISS index built — {len(all_chunks)} chunks indexed!")
+                                gc.collect()
+                            except Exception as _fe:
+                                st.warning(f"FAISS failed ({_fe}), falling back to TF-IDF.")
+
+                        if not faiss_built:
+                            from sklearn.feature_extraction.text import TfidfVectorizer as _TV
+                            _vec = _TV(max_features=15000, ngram_range=(1,2),
+                                       strip_accents="unicode", sublinear_tf=True)
+                            _mat = _vec.fit_transform(all_chunks)
+                            st.session_state.rag_vectorizer  = _vec
+                            st.session_state.rag_matrix      = _mat
+                            st.session_state.rag_use_faiss   = False
+                            st.session_state.rag_faiss_index = None
+                            st.success(f"✅ TF-IDF index built — {len(all_chunks)} chunks indexed!")
+
+                        st.session_state.rag_chunks  = all_chunks
+                        st.session_state.rag_sources = all_sources
+                        st.session_state.rag_built   = True
+                        st.session_state.rag_project = project_name or "Untitled Project"
+                        st.rerun()
+
+        if st.session_state.rag_built:
+            st.markdown("<div class='dm-divider'></div>", unsafe_allow_html=True)
+            unique_src = list(dict.fromkeys(st.session_state.rag_sources))
+            ks1, ks2, ks3 = st.columns(3)
+            ks1.markdown(f'<div class="dm-kpi green"><div class="val">'
+                         f'{len(st.session_state.rag_chunks)}</div>'
+                         f'<div class="lbl">Total Chunks</div></div>', unsafe_allow_html=True)
+            ks2.markdown(f'<div class="dm-kpi gold"><div class="val">{len(unique_src)}</div>'
+                         f'<div class="lbl">Documents</div></div>', unsafe_allow_html=True)
+            engine_lbl = "⚡ FAISS" if st.session_state.rag_use_faiss else "📊 TF-IDF"
+            ks3.markdown(f'<div class="dm-kpi"><div class="val" style="font-size:1rem">{engine_lbl}</div>'
+                         f'<div class="lbl">Search Engine</div></div>', unsafe_allow_html=True)
+            st.markdown("**Indexed files:**")
+            for s in unique_src:
+                cnt = st.session_state.rag_sources.count(s)
+                st.markdown(f'<span class="dm-badge grey">📄 {s} &nbsp;({cnt} chunks)</span> ',
+                            unsafe_allow_html=True)
+            if st.button("🗑 Clear KB", key="rag_clear", use_container_width=True):
+                for _k in ["rag_chunks","rag_sources"]:
+                    st.session_state[_k] = []
+                for _k in ["rag_vectorizer","rag_matrix","rag_faiss_index","rag_embeddings"]:
+                    st.session_state[_k] = None
+                st.session_state.rag_built      = False
+                st.session_state.rag_use_faiss  = False
+                st.rerun()
+        else:
+            st.markdown('<div class="dm-upload"><div class="uicon">📚</div>'
+                        '<div class="hint">Upload files then click Build</div></div>',
+                        unsafe_allow_html=True)
+
+    # ── RIGHT: Query ─────────────────────────────────────────
+    with rag_right:
+        st.markdown("### 🔍 Query")
+
+        if not st.session_state.rag_built:
+            st.info("Build a knowledge base first on the left.")
+        else:
+            top_k     = st.slider("Top-K results",       1, 10,  3, key="rag_topk")
+            min_score = st.slider("Min relevance score", 0.0, 1.0, 0.2 if st.session_state.rag_use_faiss else 0.05, 0.01, key="rag_minscore")
+
+            query = st.text_area("💬 Your question",
+                                 placeholder="e.g. What is the main conclusion of this document?",
+                                 height=90, key="rag_query")
+
+            if st.button("🔎 Search", key="rag_search", use_container_width=True) and query.strip():
+                with st.spinner("Retrieving…"):
+                    try:
+                        if st.session_state.rag_use_faiss and st.session_state.rag_faiss_index is not None:
+                            # ── FAISS semantic search ──
+                            results = _faiss_query(
+                                query,
+                                st.session_state.rag_faiss_index,
+                                st.session_state.rag_chunks,
+                                st.session_state.rag_sources,
+                                top_k=top_k,
+                                min_score=min_score,
+                            )
+                            if not results:
+                                st.warning("No chunks above the threshold. Lower the Min score.")
+                            else:
+                                st.markdown(
+                                    '<div style="background:#d1fae5;border:1px solid #6ee7b7;'
+                                    'border-radius:8px;padding:.4rem .8rem;font-size:.75rem;'
+                                    'color:#065f46;margin-bottom:.6rem;">⚡ FAISS semantic search — '
+                                    + str(len(results)) + ' result(s)</div>',
+                                    unsafe_allow_html=True)
+                                for rank, (idx, score_val, chunk_text, src) in enumerate(results, 1):
+                                    badge_col = "green" if score_val > 0.6 else "gold" if score_val > 0.35 else "grey"
+                                    q_words   = set(query.lower().split())
+                                    highlighted = " ".join(
+                                        f"**{w}**" if w.lower().strip(".,;:!?\"'") in q_words else w
+                                        for w in chunk_text.split())
+                                    st.markdown(
+                                        f'<div class="dm-card" style="border-left:3px solid var(--accent);'
+                                        f'padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
+                                        f'<div style="display:flex;justify-content:space-between;'
+                                        f'margin-bottom:0.4rem">'
+                                        f'<span class="dm-badge {badge_col}">#{rank} · {score_val:.3f} cosine</span>'
+                                        f'<span class="dm-badge grey">📄 {src}</span></div></div>',
+                                        unsafe_allow_html=True)
+                                    st.markdown(highlighted)
+                                    st.markdown("---")
+
+                                # score bar
+                                fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
+                                ax_s.bar(range(len(results)),
+                                         [s for _, s, _, _ in results],
+                                         color=C_BLUE, edgecolor="white")
+                                ax_s.set_xlabel("Result rank")
+                                ax_s.set_ylabel("Cosine similarity")
+                                ax_s.set_title("⚡ FAISS retrieval scores")
+                                fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
+
+                        else:
+                            # ── TF-IDF fallback ──
+                            from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                            q_vec  = st.session_state.rag_vectorizer.transform([query])
+                            scores = _cos_sim(q_vec, st.session_state.rag_matrix)[0]
+                            ranked = np.argsort(scores)[::-1]
+                            top_idx = [i for i in ranked if scores[i] >= min_score][:top_k]
+                            if not top_idx:
+                                st.warning("No chunks above the threshold. Lower the Min score.")
+                            else:
+                                st.markdown(f"**{len(top_idx)} result(s) found (TF-IDF):**")
+                                q_words = set(query.lower().split())
+                                for rank, idx in enumerate(top_idx, 1):
+                                    chunk_text = st.session_state.rag_chunks[idx]
+                                    src        = st.session_state.rag_sources[idx]
+                                    score_val  = float(scores[idx])
+                                    badge_col  = "green" if score_val > 0.3 else "gold" if score_val > 0.1 else "grey"
+                                    highlighted = " ".join(
+                                        f"**{w}**" if w.lower().strip(".,;:!?\"'") in q_words else w
+                                        for w in chunk_text.split())
+                                    st.markdown(
+                                        f'<div class="dm-card" style="border-left:3px solid var(--accent);'
+                                        f'padding:0.9rem 1.1rem;margin-bottom:0.6rem">'
+                                        f'<div style="display:flex;justify-content:space-between;'
+                                        f'margin-bottom:0.4rem">'
+                                        f'<span class="dm-badge {badge_col}">#{rank} · {score_val:.3f}</span>'
+                                        f'<span class="dm-badge grey">📄 {src}</span></div></div>',
+                                        unsafe_allow_html=True)
+                                    st.markdown(highlighted)
+                                    st.markdown("---")
+                                top20 = [(i, float(scores[i])) for i in ranked[:20]]
+                                fig_s, ax_s = plt.subplots(figsize=(6, 2.5))
+                                ax_s.bar(range(len(top20)),
+                                         [s for _, s in top20],
+                                         color=[C_BLUE if i in top_idx else "#e5e7eb" for i, _ in top20],
+                                         edgecolor="white")
+                                ax_s.set_xlabel("Chunk rank"); ax_s.set_ylabel("Cosine score")
+                                ax_s.set_title("TF-IDF retrieval scores (blue = returned)")
+                                fig_s.tight_layout(); st.pyplot(fig_s); plt.close(fig_s)
+
+                    except Exception as exc:
+                        st.error(f"Query failed: {exc}")
+
+            st.markdown("<div class='dm-divider'></div>", unsafe_allow_html=True)
+            with st.expander("🗂 Browse all chunks"):
+                unique_src2 = list(dict.fromkeys(st.session_state.rag_sources))
+                browse_src  = st.selectbox("Filter by file", ["All"] + unique_src2,
+                                           key="rag_browse_src")
+                filtered = [(i, c, s) for i,(c,s) in enumerate(
+                    zip(st.session_state.rag_chunks, st.session_state.rag_sources))
+                    if browse_src == "All" or s == browse_src]
+                st.caption(f"{len(filtered)} chunk(s)")
+                for i, chunk, src in filtered[:50]:
+                    st.markdown(f'<span class="dm-badge grey">#{i} · {src}</span>',
+                                unsafe_allow_html=True)
+                    st.text(chunk[:250] + ("…" if len(chunk) > 250 else ""))
+                    st.markdown("---")
+
+#  PAGE: INFERENCE
+# ══════════════════════════════════════════════════════════
+elif page=="🔮 Inference":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🔮</div>
+    <div><div class="title">Inference</div>
+    <div class="sub">Manual prediction & batch scoring with SHAP explanation</div></div></div>""",
+    unsafe_allow_html=True)
+
+    if not st.session_state.model: st.info("Train a model first in the AutoML page."); st.stop()
+
+    problem=st.session_state.problem; features=st.session_state.features
+    col_meta=st.session_state.col_meta; label_encoders=st.session_state.label_encoders
+
+    st.markdown("### Manual prediction")
+    st.markdown('<div class="dm-card"><div class="dm-card-title">Enter feature values</div>',unsafe_allow_html=True)
+    cols=st.columns(min(4,len(features))); raw_inputs={}
+    for i,col_name in enumerate(features):
+        with cols[i%len(cols)]:
+            meta=col_meta.get(col_name,{"type":"num","values":[]})
+            if meta["type"]=="cat" and meta["values"]:
+                raw_inputs[col_name]=st.selectbox(col_name,meta["values"],key=f"inf_{col_name}")
+            else:
+                raw_inputs[col_name]=st.number_input(col_name,value=0.0,key=f"inf_{col_name}")
+    st.markdown('</div>',unsafe_allow_html=True)
+
+    if st.button("🔮 Predict"):
+        arr=encode_inputs(raw_inputs,features,label_encoders)
+        pred=st.session_state.model.predict(arr)[0]
+        st.markdown(f"""<div class="dm-card" style="text-align:center;padding:2rem;border-top:3px solid var(--accent)">
+        <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.1em;color:var(--muted);font-family:'IBM Plex Mono',monospace">Prediction</div>
+        <div style="font-size:2.8rem;font-weight:700;color:var(--accent);margin:0.4rem 0;font-family:'IBM Plex Mono',monospace">{pred}</div>
+        </div>""",unsafe_allow_html=True)
+
+        if problem=="Classification":
+            try:
+                prob=st.session_state.model.predict_proba(arr)
+                classes=st.session_state.model.classes_
+                fig,ax=plt.subplots(figsize=(6,2.5))
+                ax.barh([str(c) for c in classes],prob[0],
+                        color=[C_BLUE if c==pred else "#e5e7eb" for c in classes],edgecolor="white")
+                ax.set_xlim(0,1); ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+                ax.set_title(f"Class probabilities — confidence {np.max(prob):.1%}")
+                fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+            except: pass
+
+        # SHAP waterfall for this prediction — premium only
+        if st.session_state.auth_plan != "premium":
+            st.markdown('<span class="dm-badge gold">🔒 SHAP Explainability — Premium only</span>',
+                        unsafe_allow_html=True)
+        elif st.session_state.shap_values is not None:
+            sv=st.session_state.shap_values; ma=np.abs(sv).mean(axis=0)
+            order=np.argsort(ma)[-10:]
+            fig,ax=plt.subplots(figsize=(6,max(3,len(order)*0.38)))
+            ax.barh([features[i] for i in order],[ma[i] for i in order],
+                    color=C_BLUE,alpha=0.8,edgecolor="white")
+            ax.set_xlabel("Mean |SHAP value|"); ax.set_title("Top feature impact (this prediction type)")
+            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+    st.markdown("<div class='dm-divider'></div>",unsafe_allow_html=True)
+    st.markdown("### Batch inference")
+    batch_file=st.file_uploader("Upload CSV for batch prediction",type=["csv"])
+    if batch_file:
+        b=batch_file.read(); batch_raw=load_csv(b); batch_proc,_=cached_feature_engineering(b)
+        missing=[f for f in features if f not in batch_proc.columns]
+        if missing: st.error(f"Missing columns: {missing}")
+        else:
+            batch_preds=st.session_state.model.predict(batch_proc[features])
+            batch_raw["prediction"]=batch_preds
+            st.dataframe(batch_raw.head(50),use_container_width=True)
+            st.download_button("⬇ Download predictions",data=batch_raw.to_csv(index=False).encode(),
+                               file_name="predictions.csv",mime="text/csv")
+
+    st.markdown("<div class='dm-divider'></div>",unsafe_allow_html=True)
+    st.markdown("### Data drift monitor")
+    drift_file=st.file_uploader("Upload new data for drift check",type=["csv"])
+    if drift_file and st.session_state.train_df is not None:
+        db2=drift_file.read(); new_proc,_=cached_feature_engineering(db2)
+        drifted=detect_drift(st.session_state.train_df,new_proc)
+        if drifted: st.warning(f"⚠️ Drift detected in: {', '.join(drifted)}")
+        else: st.success("✅ No significant drift detected.")
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: FIREBASE
+# ══════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: CLUSTERING
+# ══════════════════════════════════════════════════════════
+elif page == "🔵 Clustering":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🔵</div>
+    <div><div class="title">Clustering</div>
+    <div class="sub">K-Means · DBSCAN · Agglomerative · PCA / t-SNE visualisation</div></div></div>""",
+    unsafe_allow_html=True)
+
+    from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler as _SS
+    from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+
+    cl_file = st.file_uploader("Upload CSV dataset for clustering", type=["csv"], key="cl_up")
+    if not cl_file:
+        st.markdown('<div class="dm-upload"><div class="uicon">🔵</div>'
+                    '<div class="hint">Upload a CSV to begin clustering</div></div>',
+                    unsafe_allow_html=True)
+        st.stop()
+
+    try:
+        cl_raw = pd.read_csv(io.BytesIO(cl_file.read()))
+    except Exception as e:
+        st.error(f"Could not read CSV: {e}"); st.stop()
+
+    st.markdown(f'<span class="dm-badge blue">📄 {len(cl_raw)} rows · {len(cl_raw.columns)} cols</span>',
+                unsafe_allow_html=True)
+    st.dataframe(cl_raw.head(5), use_container_width=True)
+
+    # ── Column selection ──────────────────────────────────
+    num_cols = cl_raw.select_dtypes(include=np.number).columns.tolist()
+    if not num_cols:
+        st.error("No numeric columns found. Clustering requires numeric features."); st.stop()
+
+    st.markdown("#### ⚙️ Configuration")
+    cfg1, cfg2 = st.columns(2)
+    with cfg1:
+        cl_features = st.multiselect("Feature columns", num_cols,
+                                     default=num_cols[:min(len(num_cols), 6)], key="cl_feats")
+    with cfg2:
+        cl_algo = st.selectbox("Algorithm",
+                               ["K-Means", "DBSCAN", "Agglomerative"], key="cl_algo")
+
+    if not cl_features:
+        st.warning("Select at least 2 feature columns."); st.stop()
+
+    # ── Algorithm-specific params ─────────────────────────
+    p1, p2, p3 = st.columns(3)
+    if cl_algo == "K-Means":
+        with p1: cl_k      = int(st.slider("K (clusters)", 2, 15, 3, key="cl_k"))
+        with p2: cl_init   = st.selectbox("Init method", ["k-means++", "random"], key="cl_init")
+        with p3: cl_maxiter= int(st.number_input("Max iter", 100, 1000, 300, step=100, key="cl_mi"))
+    elif cl_algo == "DBSCAN":
+        with p1: cl_eps    = float(st.number_input("eps",   0.1, 10.0, 0.5, step=0.1, key="cl_eps"))
+        with p2: cl_minpts = int(st.number_input("min_samples", 2, 50, 5, key="cl_mp"))
+        with p3: cl_metric = st.selectbox("Metric", ["euclidean","manhattan","cosine"], key="cl_met")
+    else:  # Agglomerative
+        with p1: cl_k      = int(st.slider("K (clusters)", 2, 15, 3, key="cl_k2"))
+        with p2: cl_link   = st.selectbox("Linkage", ["ward","complete","average","single"], key="cl_lnk")
+        with p3: cl_aff    = st.selectbox("Affinity", ["euclidean","manhattan","cosine"],
+                                          key="cl_aff",
+                                          disabled=(cl_link == "ward"))
+
+    # ── Viz options ───────────────────────────────────────
+    v1, v2 = st.columns(2)
+    with v1: cl_viz   = st.selectbox("Visualisation", ["PCA (2D)", "PCA (3D — first 3 PCs)", "Feature pair"], key="cl_viz")
+    with v2: cl_scale = st.checkbox("Standardize features (recommended)", value=True, key="cl_sc")
+
+    if cl_viz == "Feature pair" and len(cl_features) >= 2:
+        fp1, fp2 = st.columns(2)
+        with fp1: cl_xfeat = st.selectbox("X axis", cl_features, key="cl_xf")
+        with fp2: cl_yfeat = st.selectbox("Y axis", cl_features,
+                                          index=min(1, len(cl_features)-1), key="cl_yf")
+
+    if st.button("🚀 Run Clustering", key="cl_run", use_container_width=True):
+        try:
+            with st.spinner("Fitting cluster model…"):
+                cl_work = cl_raw[cl_features].dropna().copy()
+                X_cl    = cl_work.values.astype(np.float64)
+                if cl_scale:
+                    scaler_cl = _SS()
+                    X_cl = scaler_cl.fit_transform(X_cl)
+
+                # ── Fit ──
+                if cl_algo == "K-Means":
+                    mdl_cl = KMeans(n_clusters=cl_k, init=cl_init,
+                                    max_iter=cl_maxiter, random_state=42, n_init=10)
+                elif cl_algo == "DBSCAN":
+                    aff_arg = cl_metric if cl_metric != "cosine" else "euclidean"
+                    mdl_cl  = DBSCAN(eps=cl_eps, min_samples=cl_minpts, metric=cl_metric)
+                else:
+                    aff_use = "euclidean" if cl_link == "ward" else cl_aff
+                    mdl_cl  = AgglomerativeClustering(n_clusters=cl_k,
+                                                      linkage=cl_link, metric=aff_use)
+
+                labels_cl = mdl_cl.fit_predict(X_cl)
+                st.session_state.cluster_model  = mdl_cl
+                st.session_state.cluster_labels = labels_cl
+                cl_work["_cluster"] = labels_cl
+                st.session_state.cluster_df = cl_work
+
+            # ── Metrics ───────────────────────────────────
+            n_found = len(set(labels_cl)) - (1 if -1 in labels_cl else 0)
+            noise   = int(np.sum(labels_cl == -1))
+            m1, m2, m3, m4 = st.columns(4)
+            m1.markdown(f'<div class="dm-kpi blue" style="border-top-color:#1a56db">'
+                        f'<div class="val">{n_found}</div>'
+                        f'<div class="lbl">Clusters found</div></div>', unsafe_allow_html=True)
+            if noise > 0:
+                m2.markdown(f'<div class="dm-kpi red"><div class="val">{noise}</div>'
+                            f'<div class="lbl">Noise points</div></div>', unsafe_allow_html=True)
+            try:
+                mask = labels_cl != -1
+                if mask.sum() > 1 and n_found > 1:
+                    sil = silhouette_score(X_cl[mask], labels_cl[mask])
+                    dbi = davies_bouldin_score(X_cl[mask], labels_cl[mask])
+                    chi = calinski_harabasz_score(X_cl[mask], labels_cl[mask])
+                    m2.markdown(f'<div class="dm-kpi green"><div class="val">{sil:.3f}</div>'
+                                f'<div class="lbl">Silhouette ↑</div></div>', unsafe_allow_html=True)
+                    m3.markdown(f'<div class="dm-kpi gold"><div class="val">{dbi:.3f}</div>'
+                                f'<div class="lbl">Davies-Bouldin ↓</div></div>', unsafe_allow_html=True)
+                    m4.markdown(f'<div class="dm-kpi"><div class="val">{chi:.0f}</div>'
+                                f'<div class="lbl">Calinski-Harabasz ↑</div></div>', unsafe_allow_html=True)
+            except Exception:
+                pass
+
+            # ── Cluster size chart ─────────────────────────
+            unique_cl, counts_cl = np.unique(labels_cl, return_counts=True)
+            palette_cl = [C_BLUE, C_GOLD, C_GREEN, C_RED, C_PURPLE, C_SLATE,
+                          "#0891b2","#d97706","#16a34a","#dc2626","#7c3aed","#64748b",
+                          "#0e7490","#b45309","#15803d"]
+            fig_sz, ax_sz = plt.subplots(figsize=(max(4, n_found * 0.8), 3))
+            bar_labels = [f"Noise" if c == -1 else f"C{c}" for c in unique_cl]
+            bar_colors = ["#9ca3af" if c == -1 else palette_cl[int(c) % len(palette_cl)]
+                          for c in unique_cl]
+            bars_sz = ax_sz.bar(bar_labels, counts_cl, color=bar_colors, edgecolor="white")
+            ax_sz.bar_label(bars_sz, padding=3, fontsize=9)
+            ax_sz.set_title("Cluster sizes"); ax_sz.set_ylabel("Count")
+            fig_sz.tight_layout(); st.pyplot(fig_sz); plt.close(fig_sz)
+
+            # ── Visualisation ──────────────────────────────
+            st.markdown("#### 📊 Cluster Visualisation")
+            if cl_viz in ("PCA (2D)", "PCA (3D — first 3 PCs)"):
+                n_comp = 3 if "3D" in cl_viz else 2
+                n_comp = min(n_comp, X_cl.shape[1])
+                pca_cl = PCA(n_components=n_comp, random_state=42)
+                X_pca  = pca_cl.fit_transform(X_cl)
+                var_exp = pca_cl.explained_variance_ratio_
+
+                if n_comp == 2 or X_cl.shape[1] < 3:
+                    fig_v, ax_v = plt.subplots(figsize=(7, 5))
+                    for ci in unique_cl:
+                        mask_v = labels_cl == ci
+                        col_v  = "#9ca3af" if ci == -1 else palette_cl[int(ci) % len(palette_cl)]
+                        lbl_v  = "Noise" if ci == -1 else f"Cluster {ci}"
+                        ax_v.scatter(X_pca[mask_v, 0], X_pca[mask_v, 1],
+                                     c=col_v, label=lbl_v, alpha=0.7, s=28, edgecolors="white", lw=0.3)
+                    ax_v.set_xlabel(f"PC1 ({var_exp[0]:.1%})")
+                    ax_v.set_ylabel(f"PC2 ({var_exp[1]:.1%})" if n_comp > 1 else "PC2")
+                    ax_v.set_title("PCA 2D — cluster view")
+                    ax_v.legend(fontsize=8, framealpha=0.85)
+                    fig_v.tight_layout(); st.pyplot(fig_v); plt.close(fig_v)
+                else:
+                    fig_v = plt.figure(figsize=(8, 6))
+                    ax_v  = fig_v.add_subplot(111, projection="3d")
+                    for ci in unique_cl:
+                        mask_v = labels_cl == ci
+                        col_v  = "#9ca3af" if ci == -1 else palette_cl[int(ci) % len(palette_cl)]
+                        lbl_v  = "Noise" if ci == -1 else f"Cluster {ci}"
+                        ax_v.scatter(X_pca[mask_v,0], X_pca[mask_v,1], X_pca[mask_v,2],
+                                     c=col_v, label=lbl_v, alpha=0.7, s=20)
+                    ax_v.set_xlabel(f"PC1 ({var_exp[0]:.1%})")
+                    ax_v.set_ylabel(f"PC2 ({var_exp[1]:.1%})")
+                    ax_v.set_zlabel(f"PC3 ({var_exp[2]:.1%})")
+                    ax_v.set_title("PCA 3D — cluster view")
+                    ax_v.legend(fontsize=7)
+                    fig_v.tight_layout(); st.pyplot(fig_v); plt.close(fig_v)
+
+                    # also show 2D projection
+                    fig_v2, ax_v2 = plt.subplots(figsize=(7, 4))
+                    for ci in unique_cl:
+                        mask_v = labels_cl == ci
+                        col_v  = "#9ca3af" if ci == -1 else palette_cl[int(ci) % len(palette_cl)]
+                        ax_v2.scatter(X_pca[mask_v,0], X_pca[mask_v,1],
+                                      c=col_v, alpha=0.7, s=20, edgecolors="white", lw=0.3)
+                    ax_v2.set_xlabel(f"PC1 ({var_exp[0]:.1%})")
+                    ax_v2.set_ylabel(f"PC2 ({var_exp[1]:.1%})")
+                    ax_v2.set_title("PCA top-2 components")
+                    fig_v2.tight_layout(); st.pyplot(fig_v2); plt.close(fig_v2)
+
+            else:  # Feature pair
+                xf = cl_xfeat if "cl_xfeat" in dir() else cl_features[0]
+                yf = cl_yfeat if "cl_yfeat" in dir() else cl_features[min(1, len(cl_features)-1)]
+                xi = cl_features.index(xf); yi = cl_features.index(yf)
+                fig_v, ax_v = plt.subplots(figsize=(7, 5))
+                for ci in unique_cl:
+                    mask_v = labels_cl == ci
+                    col_v  = "#9ca3af" if ci == -1 else palette_cl[int(ci) % len(palette_cl)]
+                    lbl_v  = "Noise" if ci == -1 else f"Cluster {ci}"
+                    ax_v.scatter(X_cl[mask_v, xi], X_cl[mask_v, yi],
+                                 c=col_v, label=lbl_v, alpha=0.7, s=28, edgecolors="white", lw=0.3)
+                ax_v.set_xlabel(xf); ax_v.set_ylabel(yf)
+                ax_v.set_title(f"{xf} vs {yf} — by cluster")
+                ax_v.legend(fontsize=8, framealpha=0.85)
+                fig_v.tight_layout(); st.pyplot(fig_v); plt.close(fig_v)
+
+            # ── K-Means elbow (only for K-Means) ──────────
+            if cl_algo == "K-Means":
+                with st.expander("📐 Elbow curve (inertia)"):
+                    ks = list(range(2, min(12, len(cl_work))))
+                    inertias = []
+                    for ki in ks:
+                        inertias.append(
+                            KMeans(n_clusters=ki, random_state=42, n_init=5).fit(X_cl).inertia_)
+                    fig_el, ax_el = plt.subplots(figsize=(6, 3))
+                    ax_el.plot(ks, inertias, "o-", color=C_BLUE, lw=2, ms=6,
+                               markerfacecolor="white", markeredgewidth=2)
+                    ax_el.axvline(cl_k, color=C_GOLD, lw=1.5, linestyle="--",
+                                  label=f"Current K={cl_k}")
+                    ax_el.set_xlabel("K"); ax_el.set_ylabel("Inertia")
+                    ax_el.set_title("Elbow curve — choose K at the bend")
+                    ax_el.legend()
+                    fig_el.tight_layout(); st.pyplot(fig_el); plt.close(fig_el)
+
+            # ── Cluster profile table ──────────────────────
+            st.markdown("#### 📋 Cluster Profiles (mean per feature)")
+            prof_df = cl_work.groupby("_cluster")[cl_features].mean().round(3)
+            prof_df.index = [f"Noise" if i == -1 else f"Cluster {i}" for i in prof_df.index]
+            st.dataframe(prof_df.style.background_gradient(cmap="Blues", axis=0),
+                         use_container_width=True)
+
+            # ── Download labelled data ─────────────────────
+            labelled_out = cl_raw.copy().iloc[cl_work.index]
+            labelled_out["cluster"] = labels_cl
+            st.download_button("⬇ Download labelled CSV",
+                               data=labelled_out.to_csv(index=False).encode(),
+                               file_name="clustered_data.csv", mime="text/csv")
+
+        except Exception as exc:
+            st.error(f"Clustering failed: {exc}")
+            import traceback; st.code(traceback.format_exc(), language="text")
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: DEEP LEARNING  (CNN images · LSTM text)
+# ══════════════════════════════════════════════════════════
+elif page == "🧠 Deep Learning":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🧠</div>
+    <div><div class="title">Deep Learning</div>
+    <div class="sub">TensorFlow CNN for images · Bidirectional LSTM for text sequences</div></div></div>""",
+    unsafe_allow_html=True)
+
+    # ── Premium gate ──────────────────────────────────────
+    if not _require_premium("Deep Learning (CNN / LSTM)"):
+        st.stop()
+
+    # ── TF availability gate ──────────────────────────────
+    if not TF_AVAILABLE:
+        st.error("⚠️ TensorFlow could not be imported.")
+        if TF_IMPORT_ERR:
+            st.code(TF_IMPORT_ERR, language="text")
+        st.markdown("""
+**Quick fixes based on your TF version:**
+```bash
+# TF 2.16+  (most common cause — Keras is now a separate package)
+pip install tf-keras
+
+# TF not found
+pip install tensorflow
+
+# Check what you have
+python -c "import tensorflow as tf; print(tf.__version__)"
+```""")
+        st.stop()
+
+    # ── Pillow check ──────────────────────────────────────
+    try:
+        from PIL import Image as _PILImage
+        _PIL_OK = True
+    except ImportError:
+        _PIL_OK = False
+
+    import base64 as _b64
+
+    # ── Helper: safe feature-name getter ─────────────────
+    def _feat_names(vec):
+        try:
+            return vec.get_feature_names_out().tolist()
+        except AttributeError:
+            return vec.get_feature_names()
+
+    # ── Model builders (inside TF block) ─────────────────
+    def _build_cnn(n_cls, h, w, filt, drop):
+        _k = keras
+        inp = _k.Input(shape=(h, w, 3))
+        x   = layers.Rescaling(1.0 / 255.0)(inp)
+        x   = layers.Conv2D(filt,    3, padding="same", activation="relu")(x)
+        x   = layers.BatchNormalization()(x)
+        x   = layers.MaxPooling2D()(x)
+        x   = layers.Conv2D(filt*2,  3, padding="same", activation="relu")(x)
+        x   = layers.BatchNormalization()(x)
+        x   = layers.MaxPooling2D()(x)
+        x   = layers.Conv2D(filt*4,  3, padding="same", activation="relu")(x)
+        x   = layers.GlobalAveragePooling2D()(x)
+        x   = layers.Dense(128, activation="relu")(x)
+        x   = layers.Dropout(drop)(x)
+        out = layers.Dense(n_cls, activation="softmax")(x)
+        mdl = _k.Model(inp, out)
+        mdl.compile(optimizer="adam",
+                    loss="sparse_categorical_crossentropy",
+                    metrics=["accuracy"])
+        return mdl
+
+    def _build_lstm(n_cls, vocab, maxlen, emb, units):
+        _k = keras
+        inp = _k.Input(shape=(maxlen,))
+        x   = layers.Embedding(vocab, emb, mask_zero=True)(inp)
+        x   = layers.Bidirectional(layers.LSTM(units, return_sequences=True))(x)
+        x   = layers.GlobalAveragePooling1D()(x)
+        x   = layers.Dense(64, activation="relu")(x)
+        x   = layers.Dropout(0.3)(x)
+        out = layers.Dense(n_cls, activation="softmax")(x)
+        mdl = _k.Model(inp, out)
+        mdl.compile(optimizer="adam",
+                    loss="sparse_categorical_crossentropy",
+                    metrics=["accuracy"])
+        return mdl
+
+    dl_tab1, dl_tab2 = st.tabs(["🖼 CNN — Image Classification", "📝 LSTM — Text Sequences"])
+
+    # ══════════════════════════════════════════
+    #  CNN TAB
+    # ══════════════════════════════════════════
+    with dl_tab1:
+        st.markdown(
+            '<div class="dm-card"><div class="dm-card-title">CNN Image Classifier</div>'
+            '<p style="font-size:0.82rem;color:#374151;margin:0 0 0.5rem">'
+            'Define your class labels (2 or more), then upload image files directly for each class. '
+            'ImageDataGenerator augmentation is applied automatically during training.</p></div>',
+            unsafe_allow_html=True)
+
+        if not _PIL_OK:
+            st.warning("⚠️ Pillow is not installed. Run: `pip install pillow`")
+
+        ca1, ca2, ca3 = st.columns(3)
+        with ca1: cnn_h   = int(st.number_input("Image height (px)", value=64, min_value=32, max_value=224, step=16, key="cnn_h"))
+        with ca2: cnn_w   = int(st.number_input("Image width (px)",  value=64, min_value=32, max_value=224, step=16, key="cnn_w"))
+        with ca3: cnn_ep  = int(st.slider("Epochs", 1, 30, 8, key="cnn_ep"))
+        cb1, cb2 = st.columns(2)
+        with cb1: cnn_filt = int(st.selectbox("Conv filters", [16, 32, 64], index=1, key="cnn_filt"))
+        with cb2: cnn_drop = float(st.slider("Dropout", 0.0, 0.6, 0.3, step=0.1, key="cnn_drop"))
+
+        # ── ImageDataGenerator augmentation options ──
+        with st.expander("⚙️ ImageDataGenerator Augmentation Settings"):
+            aug1, aug2, aug3 = st.columns(3)
+            with aug1:
+                aug_rot   = float(st.slider("Rotation range (°)",  0, 45, 15, key="aug_rot"))
+                aug_zoom  = float(st.slider("Zoom range",          0.0, 0.4, 0.1, step=0.05, key="aug_zoom"))
+            with aug2:
+                aug_hflip = st.checkbox("Horizontal flip", value=True,  key="aug_hflip")
+                aug_vflip = st.checkbox("Vertical flip",   value=False, key="aug_vflip")
+            with aug3:
+                aug_bright = float(st.slider("Brightness shift",  0.0, 0.5, 0.2, step=0.05, key="aug_bright"))
+                aug_wshift = float(st.slider("Width shift range", 0.0, 0.3, 0.1, step=0.05, key="aug_wshift"))
+
+        # ── Dynamic label management ──
+        st.markdown("#### 🏷 Define Class Labels")
+        if "cnn_labels" not in st.session_state:
+            st.session_state.cnn_labels = ["class_0", "class_1"]
+
+        lc_col, lc_btn = st.columns([3, 1])
+        with lc_col:
+            updated_labels = []
+            lbl_cols = st.columns(min(len(st.session_state.cnn_labels), 4))
+            for i, lbl in enumerate(st.session_state.cnn_labels):
+                with lbl_cols[i % len(lbl_cols)]:
+                    updated_labels.append(
+                        st.text_input(f"Label {i+1}", value=lbl, key=f"cnn_lbl_{i}")
+                    )
+            st.session_state.cnn_labels = updated_labels
+        with lc_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("➕ Add label", key="cnn_add_lbl", use_container_width=True):
+                st.session_state.cnn_labels.append(f"class_{len(st.session_state.cnn_labels)}")
+                st.rerun()
+            if len(st.session_state.cnn_labels) > 2:
+                if st.button("➖ Remove last", key="cnn_rem_lbl", use_container_width=True):
+                    st.session_state.cnn_labels.pop()
+                    st.rerun()
+
+        # ── Per-class image uploaders ──
+        st.markdown("#### 📂 Upload Images per Class")
+        cnn_class_files = {}
+        n_labels = len(st.session_state.cnn_labels)
+        cols_per_row = min(n_labels, 3)
+        label_chunks = [st.session_state.cnn_labels[i:i+cols_per_row]
+                        for i in range(0, n_labels, cols_per_row)]
+
+        for chunk in label_chunks:
+            row_cols = st.columns(len(chunk))
+            for col, lbl in zip(row_cols, chunk):
+                with col:
+                    files = st.file_uploader(
+                        f"📁 **{lbl}**", type=["png", "jpg", "jpeg"],
+                        accept_multiple_files=True, key=f"cnn_imgs_{lbl}"
+                    )
+                    cnn_class_files[lbl] = files or []
+                    st.caption(f"{len(cnn_class_files[lbl])} image(s) uploaded")
+
+        total_imgs = sum(len(v) for v in cnn_class_files.values())
+        classes_with_imgs = {k: v for k, v in cnn_class_files.items() if len(v) > 0}
+
+        if total_imgs > 0:
+            if not _PIL_OK:
+                st.error("Cannot process images — Pillow is required. Run: `pip install pillow`")
+            else:
+                n_cls_cnn = len(classes_with_imgs)
+                palette = [C_BLUE, C_GOLD, C_GREEN, C_RED, C_PURPLE, C_SLATE]
+                st.success(f"✅ {total_imgs} images across {n_cls_cnn} classes: "
+                           f"{list(classes_with_imgs.keys())}")
+
+                # Class distribution bar chart
+                fig_dist, ax_dist = plt.subplots(figsize=(max(4, n_cls_cnn * 0.9), 2.8))
+                ax_dist.bar(list(classes_with_imgs.keys()),
+                            [len(v) for v in classes_with_imgs.values()],
+                            color=[palette[i % len(palette)] for i in range(n_cls_cnn)],
+                            edgecolor="white")
+                ax_dist.set_title("Images per class"); ax_dist.set_ylabel("Count")
+                fig_dist.tight_layout(); st.pyplot(fig_dist); plt.close(fig_dist)
+
+                if n_cls_cnn < 2:
+                    st.error("Need images in at least 2 classes to train.")
+                elif st.button("🚀 Train CNN", key="cnn_train_btn"):
+                    try:
+                        with st.spinner("Loading images and training CNN with augmentation…"):
+                            label_list = sorted(classes_with_imgs.keys())
+                            lmap = {l: i for i, l in enumerate(label_list)}
+                            imgs, lbls = [], []
+                            bad = 0
+
+                            for lbl, files in classes_with_imgs.items():
+                                for f in files:
+                                    try:
+                                        pil_img = (_PILImage.open(f)
+                                                   .convert("RGB")
+                                                   .resize((cnn_w, cnn_h)))
+                                        imgs.append(np.array(pil_img, dtype=np.float32))
+                                        lbls.append(lmap[lbl])
+                                    except Exception:
+                                        bad += 1
+
+                            if bad > 0:
+                                st.warning(f"⚠️ Skipped {bad} unreadable image(s).")
+                            if len(imgs) < 4:
+                                st.error("Not enough valid images (need at least 4).")
+                                st.stop()
+
+                            X_cnn = np.stack(imgs)
+                            y_cnn = np.array(lbls, dtype=np.int32)
+                            perm  = np.random.permutation(len(X_cnn))
+                            sp    = max(1, int(0.8 * len(perm)))
+                            Xtr, Xte = X_cnn[perm[:sp]], X_cnn[perm[sp:]]
+                            ytr, yte = y_cnn[perm[:sp]], y_cnn[perm[sp:]]
+
+                            # ── ImageDataGenerator ──
+                            try:
+                                from tensorflow.keras.preprocessing.image import ImageDataGenerator as _IDG
+                            except ImportError:
+                                try:
+                                    from keras.preprocessing.image import ImageDataGenerator as _IDG
+                                except ImportError:
+                                    from tf_keras.preprocessing.image import ImageDataGenerator as _IDG
+
+                            bright_rng = ([1.0 - aug_bright, 1.0 + aug_bright]
+                                          if aug_bright > 0 else None)
+                            datagen = _IDG(
+                                rotation_range=aug_rot,
+                                width_shift_range=aug_wshift,
+                                zoom_range=aug_zoom,
+                                horizontal_flip=aug_hflip,
+                                vertical_flip=aug_vflip,
+                                brightness_range=bright_rng,
+                            )
+                            datagen.fit(Xtr)
+
+                            cnn_mdl = _build_cnn(len(label_list), cnn_h, cnn_w,
+                                                  cnn_filt, cnn_drop)
+                            es_cnn  = keras.callbacks.EarlyStopping(
+                                patience=3, restore_best_weights=True,
+                                monitor="val_accuracy")
+                            batch_sz = min(32, max(4, len(Xtr) // 4))
+                            hist_c = cnn_mdl.fit(
+                                datagen.flow(Xtr, ytr, batch_size=batch_sz),
+                                steps_per_epoch=max(1, len(Xtr) // batch_sz),
+                                epochs=cnn_ep,
+                                validation_data=(Xte, yte),
+                                callbacks=[es_cnn], verbose=0
+                            )
+                            st.session_state.dl_model    = cnn_mdl
+                            st.session_state.dl_history  = hist_c.history
+                            st.session_state.dl_type     = "cnn"
+                            st.session_state.dl_classes  = label_list
+                            st.session_state.dl_img_size = (cnn_h, cnn_w)
+
+                        h_c = hist_c.history
+                        val_acc_c  = float(max(h_c.get("val_accuracy", [0])))
+                        val_loss_c = float(min(h_c.get("val_loss",     [0])))
+                        k1, k2, k3 = st.columns(3)
+                        k1.markdown(f'<div class="dm-kpi green"><div class="val">{val_acc_c:.3f}</div><div class="lbl">Val Accuracy</div></div>', unsafe_allow_html=True)
+                        k2.markdown(f'<div class="dm-kpi"><div class="val">{val_loss_c:.3f}</div><div class="lbl">Val Loss</div></div>', unsafe_allow_html=True)
+                        k3.markdown(f'<div class="dm-kpi gold"><div class="val">{len(label_list)}</div><div class="lbl">Classes</div></div>', unsafe_allow_html=True)
+
+                        fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+                        axes[0].plot(h_c.get("accuracy",     []), color=C_BLUE, lw=2, label="Train")
+                        axes[0].plot(h_c.get("val_accuracy", []), color=C_GOLD, lw=2,
+                                     linestyle="--", label="Val")
+                        axes[0].set_title("Accuracy"); axes[0].legend()
+                        axes[1].plot(h_c.get("loss",         []), color=C_BLUE, lw=2, label="Train")
+                        axes[1].plot(h_c.get("val_loss",     []), color=C_GOLD, lw=2,
+                                     linestyle="--", label="Val")
+                        axes[1].set_title("Loss"); axes[1].legend()
+                        fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+                        with st.expander("📋 Model summary"):
+                            lines_s = []
+                            cnn_mdl.summary(print_fn=lambda x: lines_s.append(x))
+                            st.code("\n".join(lines_s), language="text")
+
+                    except Exception as exc:
+                        st.error(f"Training failed: {exc}")
+        else:
+            st.markdown('<div class="dm-upload"><div class="uicon">🖼</div>'
+                        '<div class="hint">Define your class labels above, then upload images for each class</div></div>',
+                        unsafe_allow_html=True)
+
+        # CNN inference
+        if st.session_state.get("dl_type") == "cnn" and st.session_state.dl_model and _PIL_OK:
+            st.markdown("---")
+            st.markdown("### 🔮 Predict on new image")
+            pred_img_f = st.file_uploader("Upload image to classify", type=["png","jpg","jpeg"], key="cnn_pred_f")
+            if pred_img_f:
+                try:
+                    h2, w2  = st.session_state.dl_img_size
+                    pil_in  = _PILImage.open(pred_img_f).convert("RGB").resize((w2, h2))
+                    arr_in  = np.expand_dims(np.array(pil_in, dtype=np.float32), axis=0)
+                    prob_c  = st.session_state.dl_model.predict(arr_in, verbose=0)[0]
+                    cls_c   = st.session_state.dl_classes
+                    pred_lc = cls_c[int(np.argmax(prob_c))]
+                    ca, cb  = st.columns([1, 2])
+                    with ca:
+                        st.image(pil_in, caption="Input image", use_container_width=True)
+                    with cb:
+                        st.markdown(
+                            f'<div class="dm-card" style="text-align:center;padding:1.5rem;border-top:3px solid var(--accent)">'
+                            f'<div style="font-size:0.7rem;text-transform:uppercase;color:var(--muted)">Predicted class</div>'
+                            f'<div style="font-size:2rem;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace">{pred_lc}</div>'
+                            f'<div style="font-size:0.75rem;color:var(--muted)">Confidence: {float(np.max(prob_c)):.1%}</div>'
+                            f'</div>', unsafe_allow_html=True)
+                        fig, ax = plt.subplots(figsize=(5, max(2.5, len(cls_c)*0.4)))
+                        ax.barh(cls_c, prob_c.tolist(),
+                                color=[C_BLUE if c == pred_lc else "#e5e7eb" for c in cls_c],
+                                edgecolor="white")
+                        ax.set_xlim(0, 1)
+                        ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+                        ax.set_title("Class probabilities")
+                        fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+                except Exception as exc:
+                    st.error(f"Prediction error: {exc}")
+
+    # ══════════════════════════════════════════
+    #  LSTM TAB
+    # ══════════════════════════════════════════
+    with dl_tab2:
+        st.markdown(
+            '<div class="dm-card"><div class="dm-card-title">LSTM Text Sequence Classifier</div>'
+            '<p style="font-size:0.82rem;color:#374151;margin:0 0 0.5rem">'
+            'Upload <strong>any CSV</strong>. Select your text column and — optionally — a label column. '
+            'If no label is selected, text statistics are shown only. '
+            'A label column is required to train the LSTM classifier.</p></div>',
+            unsafe_allow_html=True)
+
+        la1, la2, la3 = st.columns(3)
+        with la1: lstm_ml  = int(st.number_input("Max sequence length", value=100, min_value=10, max_value=512, step=10, key="lstm_ml"))
+        with la2: lstm_voc = int(st.number_input("Vocab size",          value=10000, min_value=500, max_value=50000, step=500, key="lstm_voc"))
+        with la3: lstm_ep  = int(st.slider("Epochs", 1, 30, 8, key="lstm_ep"))
+        lb1, lb2 = st.columns(2)
+        with lb1: lstm_emb   = int(st.selectbox("Embedding dim", [32, 64, 128], index=1, key="lstm_emb"))
+        with lb2: lstm_units = int(st.selectbox("LSTM units",    [32, 64, 128], index=1, key="lstm_un"))
+
+        lstm_file = st.file_uploader("Upload any CSV", type=["csv"], key="lstm_up")
+
+        if lstm_file:
+            try:
+                lstm_raw = pd.read_csv(io.BytesIO(lstm_file.read()))
+                st.success(f"✅ {len(lstm_raw)} rows · {len(lstm_raw.columns)} columns loaded")
+                st.dataframe(lstm_raw.head(5), use_container_width=True)
+
+                # ── Column selection ──
+                all_lstm_cols = list(lstm_raw.columns)
+                str_lstm_cols = ([c for c in all_lstm_cols if lstm_raw[c].dtype == object]
+                                 or all_lstm_cols)
+                lsc1, lsc2 = st.columns(2)
+                with lsc1:
+                    lstm_tcol = st.selectbox("📄 Text column", str_lstm_cols, key="lstm_tcol")
+                with lsc2:
+                    lstm_lcol = st.selectbox(
+                        "🏷 Label column (optional — select '— none —' to skip)",
+                        ["— none —"] + all_lstm_cols, key="lstm_lcol"
+                    )
+
+                has_label = lstm_lcol != "— none —"
+
+                # ── Text stats (always shown) ──
+                texts_preview = lstm_raw[lstm_tcol].dropna().astype(str).str.strip()
+                texts_preview = texts_preview[texts_preview.str.len() > 0]
+                word_lengths  = texts_preview.str.split().str.len()
+                sp1, sp2, sp3 = st.columns(3)
+                sp1.markdown(f'<div class="dm-kpi"><div class="val">{len(texts_preview)}</div><div class="lbl">Texts</div></div>', unsafe_allow_html=True)
+                sp2.markdown(f'<div class="dm-kpi gold"><div class="val">{int(word_lengths.mean()) if len(word_lengths) > 0 else 0}</div><div class="lbl">Avg Words</div></div>', unsafe_allow_html=True)
+                sp3.markdown(f'<div class="dm-kpi"><div class="val">{int(word_lengths.max()) if len(word_lengths) > 0 else 0}</div><div class="lbl">Max Words</div></div>', unsafe_allow_html=True)
+
+                if not has_label:
+                    st.info("ℹ️ No label column selected — showing text statistics only. "
+                            "Select a label column above to enable LSTM training.")
+                else:
+                    # ── Build working dataframe ──
+                    lstm_work = lstm_raw[[lstm_tcol, lstm_lcol]].copy()
+                    lstm_work.columns = ["text", "label"]
+                    lstm_work["text"] = lstm_work["text"].astype(str).str.strip()
+                    lstm_work = lstm_work.dropna(subset=["text", "label"])
+                    lstm_work = lstm_work[lstm_work["text"].str.len() > 0]
+
+                    n_cls_l = lstm_work["label"].nunique()
+                    cls_names = sorted(lstm_work["label"].astype(str).unique().tolist())
+                    st.success(f"✅ {len(lstm_work)} usable rows · {n_cls_l} classes: {cls_names}")
+
+                    if n_cls_l < 2:
+                        st.error("Need at least 2 unique labels to train.")
+                    elif len(lstm_work) < 10:
+                        st.error("Need at least 10 rows to train.")
+                    elif st.button("🚀 Train LSTM", key="lstm_train_btn"):
+                        try:
+                            with st.spinner("Tokenizing text and training LSTM…"):
+                                cls_l  = sorted(lstm_work["label"].astype(str).unique().tolist())
+                                lmap_l = {l: i for i, l in enumerate(cls_l)}
+                                y_l    = lstm_work["label"].astype(str).map(lmap_l).values.astype(np.int32)
+
+                                tok_l  = KerasTokenizer(num_words=lstm_voc, oov_token="<OOV>")
+                                tok_l.fit_on_texts(lstm_work["text"].tolist())
+                                seqs_l = tok_l.texts_to_sequences(lstm_work["text"].tolist())
+                                X_l    = pad_sequences(seqs_l, maxlen=lstm_ml, padding="post", truncating="post")
+
+                                perm_l = np.random.permutation(len(X_l))
+                                sp_l   = max(1, int(0.8 * len(perm_l)))
+                                Xtr_l, Xte_l = X_l[perm_l[:sp_l]], X_l[perm_l[sp_l:]]
+                                ytr_l, yte_l = y_l[perm_l[:sp_l]], y_l[perm_l[sp_l:]]
+
+                                lstm_mdl = _build_lstm(len(cls_l), lstm_voc, lstm_ml, lstm_emb, lstm_units)
+                                es_l     = keras.callbacks.EarlyStopping(
+                                    patience=3, restore_best_weights=True, monitor="val_accuracy")
+                                hist_l   = lstm_mdl.fit(
+                                    Xtr_l, ytr_l, epochs=lstm_ep, batch_size=32,
+                                    validation_data=(Xte_l, yte_l),
+                                    callbacks=[es_l], verbose=0
+                                )
+                                st.session_state.dl_model     = lstm_mdl
+                                st.session_state.dl_history   = hist_l.history
+                                st.session_state.dl_type      = "lstm"
+                                st.session_state.dl_tokenizer = tok_l
+                                st.session_state.dl_classes   = cls_l
+                                st.session_state["dl_maxlen"] = lstm_ml
+
+                            h_l  = hist_l.history
+                            va_l = float(max(h_l.get("val_accuracy", [0])))
+                            k1l, k2l = st.columns(2)
+                            k1l.markdown(f'<div class="dm-kpi green"><div class="val">{va_l:.3f}</div><div class="lbl">Val Accuracy</div></div>', unsafe_allow_html=True)
+                            k2l.markdown(f'<div class="dm-kpi gold"><div class="val">{len(cls_l)}</div><div class="lbl">Classes</div></div>', unsafe_allow_html=True)
+
+                            fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+                            axes[0].plot(h_l.get("accuracy",     []), color=C_BLUE, lw=2, label="Train")
+                            axes[0].plot(h_l.get("val_accuracy", []), color=C_GOLD, lw=2,
+                                         linestyle="--", label="Val")
+                            axes[0].set_title("Accuracy"); axes[0].legend()
+                            axes[1].plot(h_l.get("loss",         []), color=C_BLUE, lw=2, label="Train")
+                            axes[1].plot(h_l.get("val_loss",     []), color=C_GOLD, lw=2,
+                                         linestyle="--", label="Val")
+                            axes[1].set_title("Loss"); axes[1].legend()
+                            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+                        except Exception as exc:
+                            st.error(f"LSTM training failed: {exc}")
+
+            except Exception as exc:
+                st.error(f"Could not read CSV: {exc}")
+        else:
+            st.markdown('<div class="dm-upload"><div class="uicon">📝</div>'
+                        '<div class="hint">Upload any CSV — select your text column and optionally a label column</div></div>',
+                        unsafe_allow_html=True)
+
+        # LSTM inference
+        if st.session_state.get("dl_type") == "lstm" and st.session_state.dl_model:
+            st.markdown("---")
+            st.markdown("### 🔮 Classify new text")
+            infer_txt = st.text_area("Enter text to classify", height=80, key="lstm_infer")
+            if st.button("Classify", key="lstm_clf_btn") and infer_txt.strip():
+                try:
+                    ml2      = st.session_state.get("dl_maxlen", 100)
+                    tok2     = st.session_state.dl_tokenizer
+                    seq2     = tok2.texts_to_sequences([infer_txt])
+                    pad2     = pad_sequences(seq2, maxlen=ml2, padding="post", truncating="post")
+                    prob2    = st.session_state.dl_model.predict(pad2, verbose=0)[0]
+                    cls2     = st.session_state.dl_classes
+                    pred2    = cls2[int(np.argmax(prob2))]
+                    st.markdown(
+                        f'<div class="dm-card" style="text-align:center;padding:1.5rem;border-top:3px solid var(--accent)">'
+                        f'<div style="font-size:0.7rem;text-transform:uppercase;color:var(--muted)">Predicted class</div>'
+                        f'<div style="font-size:2rem;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace">{pred2}</div>'
+                        f'<div style="font-size:0.75rem;color:var(--muted)">Confidence: {float(np.max(prob2)):.1%}</div>'
+                        f'</div>', unsafe_allow_html=True)
+                    fig, ax = plt.subplots(figsize=(5, max(2.5, len(cls2)*0.4)))
+                    ax.barh(cls2, prob2.tolist(),
+                            color=[C_BLUE if c == pred2 else "#e5e7eb" for c in cls2],
+                            edgecolor="white")
+                    ax.set_xlim(0, 1)
+                    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+                    ax.set_title("Class probabilities")
+                    fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+                except Exception as exc:
+                    st.error(f"Prediction failed: {exc}")
+
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: NLP / TEXT
+# ══════════════════════════════════════════════════════════
+elif page == "💬 NLP / Text":
+    st.markdown("""<div class="dm-pagehead"><div class="icon">💬</div>
+    <div><div class="title">NLP / Text Classification</div>
+    <div class="sub">TF-IDF · Word frequency · Sklearn text classifiers · Live inference</div></div></div>""",
+    unsafe_allow_html=True)
+
+    # ── Premium gate ──────────────────────────────────────
+    if not _require_premium("NLP Text Classification"):
+        st.stop()
+
+    # Helper: safe feature names (sklearn < 1.0 vs >= 1.0)
+    def _fn(vec):
+        try:    return vec.get_feature_names_out().tolist()
+        except: return vec.get_feature_names()
+
+    nlp_file = st.file_uploader("Upload text CSV", type=["csv"], key="nlp_up")
+    if not nlp_file:
+        st.markdown('<div class="dm-upload"><div class="uicon">💬</div>'
+                    '<div class="hint">Upload a CSV with at least one text column (and optionally a label column)</div></div>',
+                    unsafe_allow_html=True)
+        st.stop()
+
+    try:
+        nlp_raw = pd.read_csv(io.BytesIO(nlp_file.read()))
+    except Exception as e:
+        st.error(f"Could not read CSV: {e}"); st.stop()
+
+    if nlp_raw.empty or len(nlp_raw.columns) == 0:
+        st.error("CSV appears to be empty."); st.stop()
+
+    # Detect text columns
+    nlp_str_cols = [c for c in nlp_raw.columns if nlp_raw[c].dtype == object]
+    if not nlp_str_cols:
+        nlp_str_cols = list(nlp_raw.columns)   # fallback: all columns
+
+    nc1, nc2 = st.columns(2)
+    with nc1: nlp_tcol = st.selectbox("📄 Text column",             nlp_str_cols)
+    with nc2: nlp_lcol = st.selectbox("🏷 Label column (optional)", ["— none —"] + list(nlp_raw.columns))
+
+    nlp_texts = nlp_raw[nlp_tcol].dropna().astype(str).tolist()
+    if len(nlp_texts) == 0:
+        st.error("Selected text column is empty after dropping nulls."); st.stop()
+
+    t_stat, t_wf, t_clf = st.tabs(["📊 Text Statistics", "🔤 Word Frequency", "🤖 Text Classifier"])
+
+    # ── Statistics tab ────────────────────────────────────
+    with t_stat:
+        try:
+            wlens = [len(t.split()) for t in nlp_texts]
+            clens = [len(t)          for t in nlp_texts]
+            s1, s2, s3, s4 = st.columns(4)
+            s1.markdown(f'<div class="dm-kpi"><div class="val">{len(nlp_texts):,}</div><div class="lbl">Documents</div></div>', unsafe_allow_html=True)
+            s2.markdown(f'<div class="dm-kpi gold"><div class="val">{int(np.mean(wlens))}</div><div class="lbl">Avg words</div></div>', unsafe_allow_html=True)
+            s3.markdown(f'<div class="dm-kpi"><div class="val">{max(wlens)}</div><div class="lbl">Max words</div></div>', unsafe_allow_html=True)
+            s4.markdown(f'<div class="dm-kpi green"><div class="val">{int(np.median(wlens))}</div><div class="lbl">Median words</div></div>', unsafe_allow_html=True)
+
+            fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+            axes[0].hist(wlens, bins=30, color=C_BLUE,   edgecolor="white", alpha=0.82)
+            axes[0].set_xlabel("Word count"); axes[0].set_title("Word count distribution")
+            axes[1].hist(clens, bins=30, color=C_PURPLE, edgecolor="white", alpha=0.82)
+            axes[1].set_xlabel("Character count"); axes[1].set_title("Character count distribution")
+            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+            st.dataframe(nlp_raw.head(20), use_container_width=True)
+        except Exception as e:
+            st.error(f"Statistics error: {e}")
+
+    # ── Word frequency tab ────────────────────────────────
+    with t_wf:
+        try:
+            ng_sel   = st.radio("N-gram", ["Unigram", "Bigram", "Trigram"], horizontal=True)
+            ng_rng   = {"Unigram": (1,1), "Bigram": (1,2), "Trigram": (1,3)}[ng_sel]
+            top_n_wf = st.slider("Top N terms", 10, 50, 20, key="topn_wf")
+            sw_raw   = st.text_input(
+                "Stopwords (comma-separated, leave blank to disable)",
+                value="the,a,an,is,in,on,at,to,of,and,or,it,this,that,for,with,as,are,was,be,has,had,have,he,she,they,we,i,you"
+            )
+            sw_list  = [w.strip() for w in sw_raw.split(",") if w.strip()] or None
+
+            wf_vec  = TfidfVectorizer(ngram_range=ng_rng, stop_words=sw_list,
+                                      max_features=top_n_wf * 5, sublinear_tf=True)
+            wf_mat  = wf_vec.fit_transform(nlp_texts)
+            wf_sum  = np.asarray(wf_mat.sum(axis=0)).ravel()
+            wf_feat = _fn(wf_vec)
+            tidx    = np.argsort(wf_sum)[-top_n_wf:]
+            tterms  = [wf_feat[i] for i in tidx]
+            tscores = [float(wf_sum[i]) for i in tidx]
+
+            fig, ax = plt.subplots(figsize=(9, max(4, len(tterms)*0.38)))
+            grad    = plt.cm.Blues_r(np.linspace(0.3, 0.85, len(tterms)))
+            bars    = ax.barh(tterms, tscores, color=grad, edgecolor="white", linewidth=0.4)
+            ax.bar_label(bars, fmt="%.3f", padding=4, fontsize=7.5, color=C_SLATE)
+            ax.set_xlabel("TF-IDF score"); ax.set_title(f"Top {top_n_wf} {ng_sel}s by TF-IDF weight")
+            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+        except Exception as e:
+            st.error(f"Word frequency error: {e}")
+
+    # ── Classifier tab ────────────────────────────────────
+    with t_clf:
+        if nlp_lcol == "— none —":
+            st.info("Select a label column above to enable text classification training.")
+        else:
+            try:
+                nlp_valid = nlp_raw[[nlp_tcol, nlp_lcol]].dropna().copy()
+                nlp_valid[nlp_tcol] = nlp_valid[nlp_tcol].astype(str)
+                nlp_valid[nlp_lcol] = nlp_valid[nlp_lcol].astype(str)
+
+                if len(nlp_valid) < 4:
+                    st.warning(f"Only {len(nlp_valid)} valid rows — need at least 4.")
+                elif nlp_valid[nlp_lcol].nunique() < 2:
+                    st.warning("Label column needs at least 2 unique classes.")
+                else:
+                    st.success(f"✅ {len(nlp_valid)} rows · {nlp_valid[nlp_lcol].nunique()} classes")
+
+                    nc3a, nc3b, nc3c = st.columns(3)
+                    with nc3a: nlp_clf_name = st.selectbox("Model", ["Logistic Regression", "LinearSVC", "Naive Bayes", "Random Forest"], key="nlp_clf")
+                    with nc3b: nlp_mf       = int(st.number_input("TF-IDF max features", value=5000, min_value=500, max_value=50000, step=500, key="nlp_mf"))
+                    with nc3c: nlp_ng_s     = st.selectbox("N-gram range", ["(1,1)", "(1,2)", "(1,3)"], key="nlp_ng")
+                    nlp_ng_p = tuple(int(x) for x in nlp_ng_s.strip("()").split(","))
+
+                    if st.button("🚀 Train Text Classifier", key="nlp_train_btn"):
+                        try:
+                            with st.spinner("Vectorizing and training…"):
+                                txts_n = nlp_valid[nlp_tcol].tolist()
+                                lbls_n = nlp_valid[nlp_lcol].tolist()
+                                le_n   = LabelEncoder()
+                                y_n    = le_n.fit_transform(lbls_n)
+
+                                vec_n  = TfidfVectorizer(max_features=nlp_mf, ngram_range=nlp_ng_p,
+                                                         sublinear_tf=True, strip_accents="unicode")
+                                X_n    = vec_n.fit_transform(txts_n)
+
+                                clf_opts = {
+                                    "Logistic Regression": LogisticRegression(max_iter=500, C=1.0, solver="saga", n_jobs=N_JOBS),
+                                    "LinearSVC":           LinearSVC(max_iter=1000),
+                                    "Naive Bayes":         MultinomialNB(),
+                                    "Random Forest":       RandomForestClassifier(n_estimators=100, n_jobs=N_JOBS, random_state=42),
+                                }
+                                clf_n  = clf_opts[nlp_clf_name]
+
+                                min_cls_n = int(nlp_valid[nlp_lcol].value_counts().min())
+                                strat_n   = y_n if min_cls_n >= 2 else None
+                                Xtr_n, Xte_n, ytr_n, yte_n = train_test_split(
+                                    X_n, y_n, test_size=0.2, random_state=42, stratify=strat_n)
+                                clf_n.fit(Xtr_n, ytr_n)
+                                pn  = clf_n.predict(Xte_n)
+                                an  = float(accuracy_score(yte_n, pn))
+                                f1n = float(f1_score(yte_n, pn, average="weighted"))
+
+                                st.session_state.nlp_model      = clf_n
+                                st.session_state.nlp_vectorizer = vec_n
+                                st.session_state.nlp_classes    = le_n.classes_.tolist()
+
+                            nk1, nk2 = st.columns(2)
+                            nk1.markdown(f'<div class="dm-kpi green"><div class="val">{an:.3f}</div><div class="lbl">Accuracy</div></div>', unsafe_allow_html=True)
+                            nk2.markdown(f'<div class="dm-kpi gold"><div class="val">{f1n:.3f}</div><div class="lbl">F1 Score (weighted)</div></div>', unsafe_allow_html=True)
+
+                            with st.expander("📋 Full classification report"):
+                                st.code(classification_report(yte_n, pn, target_names=le_n.classes_), language="text")
+
+                            cm_n = confusion_matrix(yte_n, pn)
+                            fig, ax = plt.subplots(figsize=(max(5, len(le_n.classes_)*0.9),
+                                                             max(4, len(le_n.classes_)*0.8)))
+                            sns.heatmap(cm_n, annot=True, fmt="d", cmap="Blues", linewidths=0.5,
+                                        xticklabels=le_n.classes_, yticklabels=le_n.classes_, ax=ax)
+                            ax.set_xlabel("Predicted"); ax.set_ylabel("Actual"); ax.set_title("Confusion Matrix")
+                            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+
+                        except Exception as e:
+                            st.error(f"Training error: {e}")
+
+                    # Live inference (available after training)
+                    if st.session_state.nlp_model is not None:
+                        st.markdown("---")
+                        st.markdown("### 🔮 Classify new text")
+                        live_t = st.text_area("Type text to classify", height=80, key="nlp_live_t")
+                        if st.button("Classify", key="nlp_live_btn") and live_t.strip():
+                            try:
+                                xnew  = st.session_state.nlp_vectorizer.transform([live_t])
+                                pnew  = int(st.session_state.nlp_model.predict(xnew)[0])
+                                lnew  = st.session_state.nlp_classes[pnew]
+                                st.markdown(
+                                    f'<div class="dm-card" style="text-align:center;padding:1.5rem;border-top:3px solid var(--accent)">'
+                                    f'<div style="font-size:0.7rem;text-transform:uppercase;color:var(--muted)">Predicted class</div>'
+                                    f'<div style="font-size:2rem;font-weight:700;color:var(--accent);font-family:IBM Plex Mono,monospace">{lnew}</div>'
+                                    f'</div>', unsafe_allow_html=True)
+                            except Exception as e:
+                                st.error(f"Inference error: {e}")
+
+            except Exception as e:
+                st.error(f"Classifier setup error: {e}")
+
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: CHATBOT
+# ══════════════════════════════════════════════════════════
+elif page == "🤖 Chatbot":
+    import random as _rnd
+
+    st.markdown("""<div class="dm-pagehead"><div class="icon">🤖</div>
+    <div><div class="title">Chatbot Studio</div>
+    <div class="sub">Upload any CSV — map your columns — train and chat instantly</div></div></div>""",
+    unsafe_allow_html=True)
+
+    # ── Premium gate ──────────────────────────────────────
+    if not _require_premium("Chatbot Training"):
+        st.stop()
+
+    st.markdown("""<style>
+    .cb-wrap{display:flex;flex-direction:column;gap:0.65rem;padding:0.25rem 0 1rem;}
+    .cb-row-u{display:flex;justify-content:flex-end;}
+    .cb-row-b{display:flex;justify-content:flex-start;flex-direction:column;gap:2px;}
+    .cb-bubble{padding:0.55rem 1rem;border-radius:14px;font-size:0.84rem;
+      line-height:1.55;font-family:'IBM Plex Sans',sans-serif;
+      max-width:70%;word-wrap:break-word;display:inline-block;}
+    .cb-bu{background:#1a56db;color:#fff;border-bottom-right-radius:3px;}
+    .cb-bb{background:#f1f5f9;color:#111827;border-bottom-left-radius:3px;}
+    .cb-meta{font-family:'IBM Plex Mono',monospace;font-size:0.6rem;color:#94a3b8;padding-left:4px;}
+    </style>""", unsafe_allow_html=True)
+
+    cb_tab1, cb_tab2 = st.tabs(["🧠 Train", "💬 Chat"])
+
+    # ══════════════════════════════════════════
+    #  TRAIN TAB
+    # ══════════════════════════════════════════
+    with cb_tab1:
+        st.markdown(
+            '<div class="dm-card"><div class="dm-card-title">Upload Your CSV — Any Format Works</div>'
+            '<p style="font-size:0.82rem;color:#374151;margin:0 0 0.5rem">'
+            'Upload <strong>any CSV with at least 2 columns</strong>. '
+            'Then select which column is the user input and which is the bot reply. '
+            'An optional intent/category column improves accuracy.</p></div>',
+            unsafe_allow_html=True)
+
+        # Sample CSV download
+        with st.expander("📥 Download sample CSVs"):
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                s1 = pd.DataFrame([
+                    {"question": "Hello",                "answer": "Hi! How can I help you?"},
+                    {"question": "Hi there",             "answer": "Hello! What can I do for you?"},
+                    {"question": "What is your name?",   "answer": "I am DataMind Bot!"},
+                    {"question": "How are you?",         "answer": "I am doing great, thanks for asking!"},
+                    {"question": "What can you do?",     "answer": "I can answer questions based on my training."},
+                    {"question": "Goodbye",              "answer": "Goodbye! Have a great day!"},
+                    {"question": "Thank you",            "answer": "You are welcome!"},
+                    {"question": "Help me",              "answer": "Sure! Tell me what you need."},
+                    {"question": "Tell me a joke",       "answer": "Why did the ML model go to school? To improve its learning rate!"},
+                    {"question": "What is DataMind?",    "answer": "DataMind AI is a production AutoML platform."},
+                ])
+                st.download_button("⬇ Q&A format (question/answer)",
+                                   data=s1.to_csv(index=False).encode(),
+                                   file_name="sample_qa.csv", mime="text/csv")
+            with col_s2:
+                s2 = pd.DataFrame([
+                    {"intent": "greeting",  "utterance": "Hello",         "response": "Hi there! How can I help?"},
+                    {"intent": "greeting",  "utterance": "Hi",            "response": "Hello! What do you need?"},
+                    {"intent": "greeting",  "utterance": "Hey",           "response": "Hey! Nice to meet you."},
+                    {"intent": "farewell",  "utterance": "Goodbye",       "response": "Bye! Have a great day!"},
+                    {"intent": "farewell",  "utterance": "See you later",  "response": "Take care!"},
+                    {"intent": "thanks",    "utterance": "Thank you",     "response": "You're welcome!"},
+                    {"intent": "thanks",    "utterance": "Thanks a lot",  "response": "Happy to help!"},
+                    {"intent": "help",      "utterance": "Help me",       "response": "Of course! What do you need?"},
+                    {"intent": "help",      "utterance": "I need help",   "response": "I'm here. Tell me the issue."},
+                    {"intent": "name",      "utterance": "What's your name?", "response": "I am DataMind Bot!"},
+                ])
+                st.download_button("⬇ Intent format (intent/utterance/response)",
+                                   data=s2.to_csv(index=False).encode(),
+                                   file_name="sample_intents.csv", mime="text/csv")
+
+        cb_file = st.file_uploader("Upload CSV", type=["csv"], key="cb_up")
+
+        if cb_file:
+            try:
+                cb_raw = pd.read_csv(io.BytesIO(cb_file.read()))
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}"); st.stop()
+
+            if len(cb_raw.columns) < 2:
+                st.error("CSV must have at least 2 columns."); st.stop()
+
+            all_cols_cb = list(cb_raw.columns)
+            st.success(f"✅ Loaded {len(cb_raw)} rows · {len(all_cols_cb)} columns")
+            st.dataframe(cb_raw.head(6), use_container_width=True)
+
+            st.markdown("#### Map your columns")
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                cb_in_col   = st.selectbox("📥 User input column",
+                                            all_cols_cb, index=0, key="cb_in")
+            with mc2:
+                cb_out_col  = st.selectbox("📤 Bot response column",
+                                            all_cols_cb,
+                                            index=min(1, len(all_cols_cb)-1), key="cb_out")
+            with mc3:
+                cb_int_col  = st.selectbox("🏷 Intent column (optional — improves accuracy)",
+                                            ["— none —"] + all_cols_cb, key="cb_int")
+
+            mc4, mc5 = st.columns(2)
+            with mc4: cb_mf = int(st.number_input("TF-IDF max features", value=3000, min_value=100, max_value=20000, step=100, key="cb_mf"))
+            with mc5: cb_ng = st.selectbox("N-gram range", ["(1,1)", "(1,2)", "(1,3)"], index=1, key="cb_ng")
+            cb_ng_p = tuple(int(x) for x in cb_ng.strip("()").split(","))
+
+            # Show column mapping preview
+            st.markdown(f"**Mapping preview** — input: `{cb_in_col}` → response: `{cb_out_col}`" +
+                        (f" · intent: `{cb_int_col}`" if cb_int_col != "— none —" else ""))
+            st.dataframe(cb_raw[[cb_in_col, cb_out_col] +
+                                 ([cb_int_col] if cb_int_col != "— none —" else [])].dropna().head(6),
+                         use_container_width=True)
+
+            if st.button("🚀 Train Chatbot", key="cb_train_btn"):
+                try:
+                    with st.spinner("Building intent classifier…"):
+                        # Build working dataframe
+                        cb_work = cb_raw[[cb_in_col, cb_out_col]].copy()
+                        cb_work.columns = ["_input", "_output"]
+
+                        # Determine intent column
+                        if cb_int_col != "— none —":
+                            cb_work["_intent"] = cb_raw[cb_int_col].astype(str)
+                        else:
+                            # Use response as intent (each unique response = one intent)
+                            cb_work["_intent"] = cb_work["_output"].astype(str)
+
+                        cb_work = cb_work.dropna(subset=["_input", "_output"])
+                        cb_work["_input"]  = cb_work["_input"].astype(str).str.strip()
+                        cb_work["_output"] = cb_work["_output"].astype(str)
+                        cb_work["_intent"] = cb_work["_intent"].astype(str)
+                        cb_work = cb_work[cb_work["_input"].str.len() > 0]
+
+                        if len(cb_work) < 2:
+                            st.error("Not enough valid rows (need at least 2) after removing empty inputs.")
+                            st.stop()
+
+                        # Build response map: intent → list of responses
+                        resp_map = (cb_work.groupby("_intent")["_output"]
+                                    .apply(lambda x: list(set(x.tolist())))
+                                    .to_dict())
+
+                        le_cb  = LabelEncoder()
+                        y_cb   = le_cb.fit_transform(cb_work["_intent"].tolist())
+
+                        vec_cb = TfidfVectorizer(max_features=cb_mf, ngram_range=cb_ng_p,
+                                                 sublinear_tf=True, strip_accents="unicode",
+                                                 analyzer="word")
+                        X_cb   = vec_cb.fit_transform(cb_work["_input"].tolist())
+
+                        clf_cb = LogisticRegression(max_iter=500, C=1.5, solver="saga", n_jobs=N_JOBS)
+                        clf_cb.fit(X_cb, y_cb)
+                        tr_acc = float(accuracy_score(y_cb, clf_cb.predict(X_cb)))
+
+                        st.session_state.chatbot_model        = clf_cb
+                        st.session_state.chatbot_vectorizer   = vec_cb
+                        st.session_state.chatbot_responses    = resp_map
+                        st.session_state.chatbot_classes      = le_cb.classes_.tolist()
+                        # store training inputs + raw Q->A map for cosine fallback
+                        st.session_state.chatbot_train_inputs = cb_work["_input"].tolist()
+                        gc.collect()
+                        st.session_state.chatbot_train_answers= cb_work["_output"].tolist()
+                        st.session_state.chatbot_X_train      = X_cb
+                        st.session_state.chatbot_has_intent   = (cb_int_col != "— none —")
+
+                    n_intents = len(le_cb.classes_)
+                    k1cb, k2cb, k3cb = st.columns(3)
+                    k1cb.markdown(f'<div class="dm-kpi green"><div class="val">{tr_acc:.3f}</div><div class="lbl">Training Accuracy</div></div>', unsafe_allow_html=True)
+                    k2cb.markdown(f'<div class="dm-kpi gold"><div class="val">{n_intents}</div><div class="lbl">Intents</div></div>', unsafe_allow_html=True)
+                    k3cb.markdown(f'<div class="dm-kpi"><div class="val">{len(cb_work)}</div><div class="lbl">Training Examples</div></div>', unsafe_allow_html=True)
+                    st.success(f"✅ Chatbot trained! Switch to the **Chat** tab to talk to it.")
+
+                    # Intent distribution chart (top 20)
+                    ic = cb_work["_intent"].value_counts().head(20)
+                    if len(ic) > 1:
+                        fig, ax = plt.subplots(figsize=(max(6, len(ic)*0.55), 3.5))
+                        clrs = [C_BLUE if i%2==0 else C_GOLD for i in range(len(ic))]
+                        bars = ax.bar(ic.index, ic.values, color=clrs, edgecolor="white")
+                        ax.bar_label(bars, padding=3, fontsize=8)
+                        ax.set_xlabel("Intent"); ax.set_ylabel("Examples")
+                        ax.set_title("Training examples per intent")
+                        plt.xticks(rotation=35, ha="right"); fig.tight_layout()
+                        st.pyplot(fig); plt.close(fig)
+
+                except Exception as e:
+                    st.error(f"Training error: {e}")
+
+        else:
+            st.markdown('<div class="dm-upload"><div class="uicon">🤖</div>'
+                        '<div class="hint">Upload any CSV — Q&A pairs, intents, support tickets, FAQs…</div></div>',
+                        unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════
+    #  CHAT TAB
+    # ══════════════════════════════════════════
+    with cb_tab2:
+        if not st.session_state.chatbot_model:
+            st.info("🤖 No chatbot trained yet. Go to the **Train** tab, upload a CSV, and train first.")
+        else:
+            n_cls_cb = len(st.session_state.chatbot_classes)
+            st.markdown(f'<span class="dm-badge green">🟢 Chatbot ready · {n_cls_cb} intents</span>',
+                        unsafe_allow_html=True)
+
+            def _bot_reply(msg):
+                """Return (response, intent, confidence).
+                Uses cosine similarity for Q&A CSVs (no intent col) and
+                intent classification for intent-based CSVs.
+                """
+                from sklearn.metrics.pairwise import cosine_similarity as _csim
+                msg = msg.strip()
+                if not msg:
+                    return "Please type something!", "—", 0.0
+
+                xv = st.session_state.chatbot_vectorizer.transform([msg])
+
+                has_intent  = st.session_state.get("chatbot_has_intent", False)
+                X_train     = st.session_state.get("chatbot_X_train")
+                train_ans   = st.session_state.get("chatbot_train_answers", [])
+
+                # ── For Q&A CSVs: cosine similarity against all training inputs ──
+                if not has_intent and X_train is not None and len(train_ans) > 0:
+                    sims   = _csim(xv, X_train)[0]
+                    best_i = int(np.argmax(sims))
+                    best_s = float(sims[best_i])
+                    if best_s < 0.05:
+                        # very low match — try intent classification as last resort
+                        pass
+                    else:
+                        # find all rows with similarity close to best (within 0.05)
+                        close_idx = [i for i, s in enumerate(sims)
+                                     if s >= max(0.05, best_s - 0.05)]
+                        answer = _rnd.choice([train_ans[i] for i in close_idx])
+                        intent = f"cosine_match({best_s:.2f})"
+                        return answer, intent, best_s
+
+                # ── Intent classification (intent col provided or cosine failed) ──
+                try:
+                    prbs   = st.session_state.chatbot_model.predict_proba(xv)[0]
+                    best_i = int(np.argmax(prbs))
+                    intent = st.session_state.chatbot_classes[best_i]
+                    conf   = float(prbs[best_i])
+                except AttributeError:
+                    pred   = int(st.session_state.chatbot_model.predict(xv)[0])
+                    intent = st.session_state.chatbot_classes[pred]
+                    conf   = 1.0
+
+                # Lower threshold — 0.05 instead of 0.20
+                if conf < 0.05:
+                    # Still return best guess rather than generic message
+                    resps = st.session_state.chatbot_responses.get(
+                        intent, ["I don't have a good answer for that — can you rephrase?"])
+                    return _rnd.choice(resps), intent + " (low conf)", conf
+
+                resps = st.session_state.chatbot_responses.get(
+                    intent, ["I don't have a response for that."])
+                return _rnd.choice(resps), intent, conf
+
+            # Render chat history
+            if st.session_state.chat_history:
+                html_chat = '<div class="cb-wrap">'
+                for m in st.session_state.chat_history:
+                    if m["role"] == "user":
+                        html_chat += (f'<div class="cb-row-u">'
+                                      f'<span class="cb-bubble cb-bu">{m["content"]}</span></div>')
+                    else:
+                        conf_s = f"{m.get('conf', 0):.0%}" if m.get("conf") is not None else ""
+                        html_chat += (f'<div class="cb-row-b">'
+                                      f'<span class="cb-bubble cb-bb">{m["content"]}</span>'
+                                      f'<span class="cb-meta">intent: {m.get("intent","—")} · {conf_s}</span>'
+                                      f'</div>')
+                html_chat += '</div>'
+                st.markdown(html_chat, unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div style="text-align:center;color:#94a3b8;font-size:0.82rem;padding:2.5rem">'
+                    'Send a message below to start chatting ↓</div>',
+                    unsafe_allow_html=True)
+
+            # Input row
+            ci1, ci2, ci3 = st.columns([5, 1, 1])
+            with ci1:
+                user_msg = st.text_input("Your message", placeholder="Type here…",
+                                          label_visibility="collapsed", key="cb_input_msg")
+            with ci2:
+                send_btn = st.button("Send", use_container_width=True, key="cb_send_btn")
+            with ci3:
+                if st.button("Clear", use_container_width=True, key="cb_clr_btn"):
+                    st.session_state.chat_history = []
+                    st.rerun()
+
+            if send_btn and user_msg.strip():
+                reply, det_intent, det_conf = _bot_reply(user_msg)
+                st.session_state.chat_history.append({"role": "user", "content": user_msg})
+                st.session_state.chat_history.append({
+                    "role": "bot", "content": reply,
+                    "intent": det_intent, "conf": det_conf
+                })
+                st.rerun()
+
+            # Intent confidence expander for last message
+            if len(st.session_state.chat_history) >= 2:
+                last_u = next((m["content"] for m in reversed(st.session_state.chat_history)
+                               if m["role"] == "user"), None)
+                if last_u:
+                    try:
+                        with st.expander("🔍 Intent confidence breakdown"):
+                            xv2    = st.session_state.chatbot_vectorizer.transform([last_u])
+                            prbs2  = st.session_state.chatbot_model.predict_proba(xv2)[0]
+                            clss2  = st.session_state.chatbot_classes
+                            n_show = min(8, len(clss2))
+                            tidx2  = np.argsort(prbs2)[-n_show:][::-1]
+                            fig, ax = plt.subplots(figsize=(6, max(2.5, n_show*0.38)))
+                            ax.barh([clss2[i] for i in tidx2],
+                                    [float(prbs2[i]) for i in tidx2],
+                                    color=[C_BLUE if k==0 else "#e5e7eb" for k in range(n_show)],
+                                    edgecolor="white")
+                            ax.set_xlim(0, 1)
+                            ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+                            ax.set_title("Top intent probabilities")
+                            fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+                    except Exception:
+                        pass   # LinearSVC doesn't support predict_proba — silently skip chart
+elif page == "💳 Pricing":
+    st.markdown("""
+    <div class="dm-pagehead">
+      <div class="icon">💳</div>
+      <div><div class="title">Plans & Pricing</div>
+      <div class="sub">Simple, transparent pricing for every user</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    _is_premium  = st.session_state.auth_plan == "premium"
+    _is_pending  = st.session_state.auth_plan == "pending_review"
+    _used        = st.session_state.auth_proj_used
+    _left        = max(0, PLAN_FREE_PROJ - _used)
+
+    # ── Plan cards ──────────────────────────────────────────
+    _pc1, _pc2 = st.columns(2)
+    with _pc1:
+        _border = "#1a56db" if (not _is_premium and not _is_pending) else "#e2e6ea"
+        st.markdown(f"""
+        <div class="dm-card" style="border-top:4px solid {_border};min-height:320px">
+          <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;
+            letter-spacing:.08em;color:#6b7280;margin-bottom:.5rem">Free Plan</div>
+          <div style="font-size:2rem;font-weight:700;color:#111827">
+            ₹0 <span style="font-size:0.9rem;font-weight:400;color:#6b7280">/ forever</span>
+          </div>
+          <hr style="border-color:#e2e6ea;margin:1rem 0">
+          <ul style="font-size:0.85rem;line-height:2.2;color:#374151;padding-left:1.2rem">
+            <li>✅ {PLAN_FREE_PROJ} projects total</li>
+            <li>✅ Analysis, AutoML, Evaluation</li>
+            <li>✅ NLP & Chatbot</li>
+            <li>✅ Auto Labeling (TF-IDF)</li>
+            <li>❌ Deep Learning / CNN / LSTM</li>
+            <li>❌ Deep Learning (CNN/LSTM)</li>
+            <li>❌ Firebase persistence</li>
+          </ul>
+          {"<div style='margin-top:.5rem'><span style='background:#fef3c7;color:#b45309;border-radius:20px;padding:3px 12px;font-size:0.75rem;font-weight:600'>Current Plan</span></div>" if (not _is_premium and not _is_pending) else ""}
+        </div>""", unsafe_allow_html=True)
+
+    with _pc2:
+        st.markdown(f"""
+        <div class="dm-card" style="border-top:4px solid #1a56db;min-height:320px;
+          box-shadow:0 4px 24px rgba(26,86,219,.12)">
+          <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;
+            letter-spacing:.08em;color:#1a56db;margin-bottom:.5rem">
+            Premium Plan &nbsp;⭐
+          </div>
+          <div style="font-size:2rem;font-weight:700;color:#111827">
+            ₹{PLAN_PRICE} <span style="font-size:0.9rem;font-weight:400;color:#6b7280">/ month</span>
+          </div>
+          <hr style="border-color:#e2e6ea;margin:1rem 0">
+          <ul style="font-size:0.85rem;line-height:2.2;color:#374151;padding-left:1.2rem">
+            <li>✅ <strong>Unlimited</strong> projects</li>
+            <li>✅ Everything in Free</li>
+            <li>✅ Deep Learning · CNN · LSTM</li>
+            <li>✅ Ensemble + MobileNetV2 auto-labeling</li>
+            <li>✅ Firebase persistence</li>
+            <li>✅ SHAP explainability</li>
+            <li>✅ Priority support</li>
+          </ul>
+          {"<div style='margin-top:.5rem'><span style='background:#d1fae5;color:#047857;border-radius:20px;padding:3px 12px;font-size:0.75rem;font-weight:600'>Current Plan — Active</span></div>" if _is_premium else ""}
+          {"<div style='margin-top:.5rem'><span style='background:#fef3c7;color:#d97706;border-radius:20px;padding:3px 12px;font-size:0.75rem;font-weight:600'>⏳ Pending Approval</span></div>" if _is_pending else ""}
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+
+    # ── Usage meter ──────────────────────────────────────────
+    st.markdown('<div class="dm-card-title">Your Usage</div>', unsafe_allow_html=True)
+    _um1, _um2, _um3 = st.columns(3)
+    _um1.markdown(
+        f'<div class="dm-kpi"><div class="val">{_used}</div>'
+        f'<div class="lbl">Projects Used</div></div>', unsafe_allow_html=True)
+    _um2.markdown(
+        f'<div class="dm-kpi {"gold" if _left == 0 and not _is_premium else "green"}">'
+        f'<div class="val">{"∞" if _is_premium else ("—" if _is_pending else _left)}</div>'
+        f'<div class="lbl">Projects Left</div></div>', unsafe_allow_html=True)
+    _plan_disp  = "Premium" if _is_premium else ("⏳ Pending" if _is_pending else "Free")
+    _plan_clr   = "#047857" if _is_premium else ("#d97706" if _is_pending else "#b45309")
+    _um3.markdown(
+        f'<div class="dm-kpi"><div class="val" style="color:{_plan_clr}">'
+        f'{_plan_disp}</div>'
+        f'<div class="lbl">Current Plan</div></div>', unsafe_allow_html=True)
+
+    if _is_premium and st.session_state.auth_paid_until:
+        _days_rem = (st.session_state.auth_paid_until - datetime.datetime.utcnow()).days
+        st.info(f"Your Premium plan expires in **{max(0, _days_rem)} days** "
+                f"({st.session_state.auth_paid_until.strftime('%d %b %Y')}). "
+                f"Pay again before expiry to continue uninterrupted.")
+
+    if _is_pending:
+        st.warning(
+            "⏳ **Payment under review.** Your UTR has been received and is being verified "
+            "Premium will be activated instantly. "
+            "Contact support if it takes longer.")
+
+    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+
+    # ── Payment section — only show to free users ────────────────────────
+    if not _is_premium and not _is_pending:
+        st.markdown("### Upgrade Now — ₹1000/month")
+
+        # Check for Razorpay callback on this page too
+        if _check_razorpay_callback():
+            st.success("Payment verified! Premium activated.")
+            st.balloons()
+            st.rerun()
+
+        _pay1, _pay2 = st.columns(2)
+
+        with _pay1:
+            st.markdown("""
+            <div class="dm-card">
+              <div class="dm-card-title">How to Pay</div>
+              <ol style="font-size:0.85rem;line-height:2.4;color:#374151;padding-left:1.2rem">
+                <li><strong>Razorpay (Recommended):</strong> Click Pay button below — instant activation</li>
+                <li><strong>UPI Manual:</strong> Scan QR or use UPI ID, then enter 12-digit UTR</li>
+                <li>Activation is instant for both Razorpay and manual UPI</li>
+              </ol>
+            </div>""", unsafe_allow_html=True)
+
+        with _pay2:
+            st.markdown('<div class="dm-card"><div class="dm-card-title">UPI QR Code</div>',
+                        unsafe_allow_html=True)
+            _qr2 = _generate_upi_qr()
+            if _qr2:
+                import io as _bio2
+                _buf2 = _bio2.BytesIO()
+                _qr2.save(_buf2, format="PNG")
+                st.image(_buf2.getvalue(), width=180, caption="Pay ₹" + str(PLAN_PRICE) + " via UPI")
+            else:
+                st.code("UPI ID: " + UPI_ID, language=None)
+            st.markdown(
+                '<div style="background:#f0f7ff;border-radius:8px;padding:.6rem 1rem;'
+                'font-family:IBM Plex Mono,monospace;font-size:0.82rem;color:#1a56db">'
+                + UPI_ID + '<br>&#8377;' + str(PLAN_PRICE) + ' &middot; ' + UPI_NAME +
+                '</div>', unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+
+        _ptab2_rzp, _ptab2_upi = st.tabs(["💳 Razorpay — Instant Activation", "🏦 UPI — Manual Verification"])
+
+        with _ptab2_rzp:
+            st.markdown(
+                '<div style="background:#f0f7ff;border:1px solid #bdd3fc;border-radius:10px;'
+                'padding:.7rem 1rem;font-size:.82rem;color:#1e40af;margin-bottom:.75rem">'
+                '&#9889; Razorpay handles cards, UPI, netbanking, wallets. '
+                'Premium activates <strong>immediately</strong> after payment.</div>',
+                unsafe_allow_html=True)
+            if "rzp_order_pricing" not in st.session_state:
+                try:
+                    st.session_state.rzp_order_pricing = _razorpay_create_order(PLAN_PRICE)
+                except Exception as _ep:
+                    st.session_state.rzp_order_pricing = None
+                    st.warning("Razorpay unavailable: " + str(_ep))
+            _rzp_o2 = st.session_state.get("rzp_order_pricing")
+            if _rzp_o2 and _rzp_o2.get("id"):
+                _render_razorpay_button(
+                    order_id=_rzp_o2["id"],
+                    amount_inr=PLAN_PRICE,
+                    user_email=st.session_state.auth_email,
+                )
+            else:
+                st.info("Add RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET in main.py to enable this.")
+
+        with _ptab2_upi:
+            st.markdown(
+                '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
+                'padding:.55rem .85rem;font-size:.78rem;color:#92400e;margin-bottom:.65rem">'
+                '&#9888; Paste your 12-digit UTR from your UPI app after paying. '
+                'Premium activates instantly after submitting your Transaction ID.</div>',
+                unsafe_allow_html=True)
+            _utr2 = st.text_input("UTR / Transaction ID",
+                                   placeholder="12-digit UTR number", key="pricing_utr")
+            if st.button("Submit for Verification", key="pricing_activate"):
+                _ok2, _msg2 = _submit_payment(st.session_state.auth_uid, _utr2)
+                if _ok2:
+                    st.success(_msg2)
+                    st.session_state.pop("rzp_order_pricing", None)
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error(_msg2)
+
+    elif _is_premium:
+        st.success("You are on the Premium plan. Enjoy unlimited access!")
+        if st.button("Renew Premium (₹1000)", key="pricing_renew"):
+            st.session_state.pop("rzp_order", None)
+            st.session_state.pop("rzp_order_pricing", None)
+            st.session_state.auth_page = "payment"
+            st.rerun()
+elif page == "🤖 Auto Labeling":
+    import requests as _rq
+
+    # ════════════════════════════════════════════════════════════
+    #  SHARED STYLES — Auto Labeling Studio
+    # ════════════════════════════════════════════════════════════
+    st.markdown("""
+    <style>
+    .als-hero{background:linear-gradient(135deg,#0f1b2d 0%,#1a3a6b 60%,#1a56db 100%);
+      border-radius:16px;padding:2rem 2.5rem;margin-bottom:1.5rem;
+      position:relative;overflow:hidden;}
+    .als-hero::after{content:'';position:absolute;width:300px;height:300px;
+      border-radius:50%;background:radial-gradient(circle,rgba(96,165,250,.2),transparent 70%);
+      top:-80px;right:-60px;pointer-events:none;}
+    .als-hero-title{font-size:1.45rem;font-weight:800;color:#fff;
+      letter-spacing:-.02em;margin-bottom:.3rem;}
+    .als-hero-sub{font-size:.8rem;color:#93c5fd;margin-bottom:1.25rem;}
+    .als-hero-chips{display:flex;gap:.5rem;flex-wrap:wrap;}
+    .als-chip{padding:.22rem .8rem;border-radius:20px;font-size:.68rem;font-weight:600;
+      background:rgba(255,255,255,.12);color:#bfdbfe;
+      border:1px solid rgba(255,255,255,.18);}
+    .als-chip.active{background:rgba(255,255,255,.22);color:#fff;}
+    .als-mode-card{background:#fff;border:2px solid #e2e6ea;border-radius:14px;
+      padding:1.5rem;cursor:pointer;transition:all .2s;text-align:center;}
+    .als-mode-card:hover{border-color:#1a56db;
+      box-shadow:0 4px 20px rgba(26,86,219,.12);}
+    .als-mode-card.selected{border-color:#1a56db;
+      background:linear-gradient(135deg,#eef4ff,#f0f7ff);}
+    .als-mode-icon{font-size:2rem;margin-bottom:.5rem;}
+    .als-mode-title{font-size:.95rem;font-weight:700;color:#0f1b2d;margin-bottom:.25rem;}
+    .als-mode-sub{font-size:.75rem;color:#64748b;}
+    .als-stat{background:#fff;border:1px solid #e2e6ea;border-radius:12px;
+      padding:.85rem 1rem;text-align:center;}
+    .als-stat-val{font-family:'IBM Plex Mono',monospace;font-size:1.5rem;
+      font-weight:700;color:#1a56db;}
+    .als-stat-val.green{color:#047857;}
+    .als-stat-val.gold{color:#b45309;}
+    .als-stat-val.purple{color:#6d28d9;}
+    .als-stat-lbl{font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;
+      color:#6b7280;margin-top:2px;}
+    .als-pipeline-bar{display:flex;align-items:center;gap:0;
+      background:#f8fafc;border:1px solid #e2e6ea;border-radius:10px;
+      overflow:hidden;margin:1rem 0;}
+    .als-pipe-step{flex:1;padding:.55rem .5rem;text-align:center;
+      font-size:.7rem;font-weight:600;color:#64748b;position:relative;}
+    .als-pipe-step.done{background:#d1fae5;color:#047857;}
+    .als-pipe-step.active{background:#1a56db;color:#fff;}
+    .als-pipe-step.pending{background:#f8fafc;color:#94a3b8;}
+    .als-img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+      gap:12px;margin-top:1rem;}
+    .als-img-card{background:#fff;border:1.5px solid #e2e6ea;border-radius:12px;
+      overflow:hidden;transition:all .2s;}
+    .als-img-card:hover{border-color:#1a56db;
+      box-shadow:0 4px 16px rgba(26,86,219,.12);}
+    .als-img-label{padding:.5rem .6rem;font-size:.72rem;font-weight:600;
+      color:#0f1b2d;border-top:1px solid #f1f5f9;}
+    .als-img-conf{font-size:.65rem;color:#6b7280;}
+    .als-section{background:#fff;border:1px solid #e2e6ea;border-radius:14px;
+      padding:1.25rem 1.5rem;margin-bottom:1rem;}
+    .als-section-title{font-size:.72rem;font-weight:700;text-transform:uppercase;
+      letter-spacing:.08em;color:#94a3b8;margin-bottom:1rem;
+      padding-bottom:.6rem;border-bottom:1px solid #f1f5f9;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Session state ───────────────────────────────────────────
+    for _k,_v in [
+        ("al_mode_type","text"),          # "text" | "image"
+        ("al_df",None),("al_results",None),("al_labels",[]),
+        ("al_text_col",None),("al_mode","supervised"),
+        ("al_review_df",None),("al_trained_model",None),
+        ("al_trained_vec",None),("al_seed_data",{}),("al_n_clusters",5),
+        ("al_ensemble_thresh",0.72),
+        # Image labeling
+        ("al_img_files",[]),("al_img_results",[]),
+        ("al_img_conf",0.35),("al_img_labels",[]),
+        ("al_img_mode","imagenet"),
+        ("al_mobilenet_model",None),("al_mobilenet_extractor",None),
+        ("al_top_k",3),
+    ]:
+        if _k not in st.session_state: st.session_state[_k] = _v
+
+    # ── Ensemble text helpers (100% offline, pure sklearn) ─────────────
+    def _build_ensemble(texts_all, train_X, train_y):
+        """
+        Three-view soft-voting ensemble for text classification.
+          View A: TF-IDF word 1-2grams   + LogisticRegression
+          View B: TF-IDF char 3-5grams   + CalibratedLinearSVC
+          View C: TF-IDF word 1gram      + SGDClassifier
+        Returns a predict_proba(texts) -> (proba_matrix, classes) callable.
+        """
+        from sklearn.svm import LinearSVC
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.linear_model import SGDClassifier
+
+        vA = TfidfVectorizer(max_features=20000, ngram_range=(1,2),
+                             sublinear_tf=True, analyzer="word", min_df=1)
+        vB = TfidfVectorizer(max_features=30000, ngram_range=(3,5),
+                             sublinear_tf=True, analyzer="char_wb", min_df=1)
+        vC = TfidfVectorizer(max_features=15000, ngram_range=(1,1),
+                             sublinear_tf=True, analyzer="word", min_df=1)
+
+        # Fit vectorizers on ALL texts so vocab covers the full corpus
+        vA.fit(texts_all); vB.fit(texts_all); vC.fit(texts_all)
+
+        clA = LogisticRegression(max_iter=1000, C=2.0, solver="saga", n_jobs=N_JOBS)
+        clB = CalibratedClassifierCV(LinearSVC(max_iter=2000, C=1.0), cv=3)
+        clC = SGDClassifier(loss="modified_huber", max_iter=500, random_state=42, n_jobs=N_JOBS)
+
+        XA = vA.transform(train_X)
+        XB = vB.transform(train_X)
+        XC = vC.transform(train_X)
+
+        clA.fit(XA, train_y)
+        clB.fit(XB, train_y)
+        clC.fit(XC, train_y)
+
+        _classes = clA.classes_
+
+        def _predict_proba(input_texts):
+            pA = clA.predict_proba(vA.transform(input_texts))
+            pB = clB.predict_proba(vB.transform(input_texts))
+            pC = clC.predict_proba(vC.transform(input_texts))
+            return (pA + pB + pC) / 3.0, _classes
+
+        return _predict_proba, _classes
+
+
+    # ════════════════════════════════════════════════════════════
+    #  HERO BANNER
+    # ════════════════════════════════════════════════════════════
+    st.markdown("""
+    <div class="als-hero">
+      <div class="als-hero-title">&#127991; Auto Labeling Studio</div>
+      <div class="als-hero-sub">
+        Scale AI-style intelligent labeling &middot;
+        Voting Ensemble text classification &middot;
+        MobileNetV2 offline image labeling &middot; Human-in-the-loop review
+      </div>
+      <div class="als-hero-chips">
+        <span class="als-chip active">Text Labeling</span>
+        <span class="als-chip active">Image Labeling</span>
+        <span class="als-chip active">Voting Ensemble</span>
+        <span class="als-chip active">MobileNetV2</span>
+        <span class="als-chip active">100% Offline</span>
+        <span class="als-chip active">Human Review</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════
+    #  MODE SELECTOR
+    # ════════════════════════════════════════════════════════════
+    st.markdown('<div class="als-section-title" style="font-size:.8rem;font-weight:700;'
+                'color:#374151;text-transform:none;letter-spacing:0">Select Labeling Mode</div>',
+                unsafe_allow_html=True)
+    _mc1, _mc2 = st.columns(2)
+    with _mc1:
+        _txt_sel = st.session_state.al_mode_type == "text"
+        st.markdown(
+            '<div class="als-mode-card' + (' selected' if _txt_sel else '') + '">'
+            '<div class="als-mode-icon">&#128203;</div>'
+            '<div class="als-mode-title">Text Labeling</div>'
+            '<div class="als-mode-sub">CSV / tabular data &middot; TF-IDF + Voting Ensemble'
+            ' &middot; Supervised &amp; unsupervised</div>'
+            '</div>', unsafe_allow_html=True)
+        if st.button("Select Text Mode", key="al_mode_txt",
+                     use_container_width=True):
+            st.session_state.al_mode_type = "text"; st.rerun()
+    with _mc2:
+        _img_sel = st.session_state.al_mode_type == "image"
+        st.markdown(
+            '<div class="als-mode-card' + (' selected' if _img_sel else '') + '">'
+            '<div class="als-mode-icon">&#128247;</div>'
+            '<div class="als-mode-title">Image Labeling</div>'
+            '<div class="als-mode-sub">Upload images &middot; YOLO v8 object detection'
+            ' &middot; Bounding boxes &amp; class labels</div>'
+            '</div>', unsafe_allow_html=True)
+        if st.button("Select Image Mode", key="al_mode_img",
+                     use_container_width=True):
+            st.session_state.al_mode_type = "image"; st.rerun()
+
+    st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════
+    #  TEXT LABELING
+    # ════════════════════════════════════════════════════════════
+    if st.session_state.al_mode_type == "text":
+        al_tab1, al_tab2, al_tab3, al_tab4 = st.tabs(
+            ["⚙️  Setup", "⚡  Auto-Label", "👁️  Review Queue", "📥  Export"])
+
+        # ── TAB 1 SETUP ──────────────────────────────────────────
+        with al_tab1:
+            _s1 = st.container()
+            with _s1:
+                st.markdown('<div class="als-section">'
+                            '<div class="als-section-title">Text Classification Engine</div>',
+                            unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="background:#eef4ff;border:1px solid #bdd3fc;border-radius:10px;'
+                    'padding:.7rem 1rem;font-size:.82rem;color:#1a56db;margin-bottom:.75rem">'
+                    '<strong>Two-phase pipeline:</strong> Phase 1 — fast TF-IDF pass on all rows &rarr; '
+                    'Phase 2 — low-confidence rows go through a <strong>Voting Ensemble</strong> '
+                    '(word n-grams + char n-grams + SGD) for a second opinion. '
+                    '100% offline, no API keys needed.</div>',
+                    unsafe_allow_html=True)
+                _ec1, _ec2 = st.columns(2)
+                with _ec1:
+                    _ens_thresh = st.slider(
+                        "Handoff threshold",
+                        0.40, 0.99,
+                        float(st.session_state.get("al_ensemble_thresh", 0.72)),
+                        0.01, key="al_ens_thresh",
+                        help="Rows where TF-IDF confidence < this go to the Voting Ensemble for a second opinion")
+                    st.session_state.al_ensemble_thresh = _ens_thresh
+                with _ec2:
+                    st.markdown(
+                        '<div style="font-size:.78rem;color:#374151;margin-top:.25rem">'
+                        '<b>Phase 1:</b> TF-IDF + Logistic Regression (all rows)<br>'
+                        '<b>Phase 2:</b> Word bigrams + Char 5-grams + SGD voting<br>'
+                        '<b>Result:</b> Higher accuracy, full confidence calibration</div>',
+                        unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="als-section">'
+                        '<div class="als-section-title">Upload Data</div>',
+                        unsafe_allow_html=True)
+            _af = st.file_uploader("Upload CSV", type="csv", key="al_up")
+            if _af:
+                _raw = load_csv(_af.read())
+                st.session_state.al_df = _raw
+                st.markdown(
+                    f'<span class="dm-badge green">{len(_raw):,} rows &middot;'
+                    f' {len(_raw.columns)} cols</span>', unsafe_allow_html=True)
+                st.dataframe(_raw.head(4), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if st.session_state.al_df is not None:
+                _df = st.session_state.al_df
+                st.markdown('<div class="als-section">'
+                            '<div class="als-section-title">Configure Task</div>',
+                            unsafe_allow_html=True)
+                _ca,_cb = st.columns(2)
+                with _ca:
+                    _tc = st.selectbox("Text column", _df.columns.tolist(), key="al_tc")
+                    st.session_state.al_text_col = _tc
+                with _cb:
+                    _ms = st.radio("Mode",
+                        ["Supervised (seed labels)","Unsupervised (auto-cluster)"],
+                        key="al_ms")
+                    st.session_state.al_mode = "supervised" if "Supervised" in _ms else "unsupervised"
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                if st.session_state.al_mode == "supervised":
+                    st.markdown('<div class="als-section">'
+                                '<div class="als-section-title">Label Taxonomy</div>',
+                                unsafe_allow_html=True)
+                    _lr = st.text_area("Labels (one per line)",
+                        value="positive\nnegative\nneutral", height=110, key="al_lta")
+                    _labels = [l.strip() for l in _lr.splitlines() if l.strip()]
+                    st.session_state.al_labels = _labels
+                    if _labels:
+                        st.markdown(" ".join(
+                            f'<span class="dm-badge blue">{l}</span>' for l in _labels),
+                            unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                    st.markdown('<div class="als-section">'
+                                '<div class="als-section-title">Seed Examples (optional)</div>',
+                                unsafe_allow_html=True)
+                    _seed = {}
+                    for _lbl in _labels:
+                        _seed[_lbl] = st.text_area(
+                            f"Examples for {_lbl}",
+                            placeholder=f"One per line for '{_lbl}'",
+                            height=70, key=f"al_seed_{_lbl}")
+                    st.session_state.al_seed_data = _seed
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="als-section">'
+                                '<div class="als-section-title">Cluster Settings</div>',
+                                unsafe_allow_html=True)
+                    _nc = st.slider("Number of clusters",2,20,5,key="al_nc")
+                    st.session_state.al_n_clusters = _nc
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── TAB 2 AUTO-LABEL ─────────────────────────────────────
+        with al_tab2:
+            if st.session_state.al_df is None:
+                st.markdown(
+                    '<div style="text-align:center;padding:3rem;color:#94a3b8;">'
+                    '<div style="font-size:2.5rem;margin-bottom:.5rem">&#128203;</div>'
+                    '<div style="font-size:.9rem">Upload a CSV in the Setup tab first</div>'
+                    '</div>', unsafe_allow_html=True)
+            elif not st.session_state.al_text_col:
+                st.warning("Select a text column in the Setup tab first.")
+            elif st.session_state.al_mode=="supervised" and not st.session_state.al_labels:
+                st.warning("Define at least one label in the Setup tab.")
+            else:
+                _df2 = st.session_state.al_df.copy()
+                _tc2 = st.session_state.al_text_col
+                st.markdown(
+                    '<div style="background:#eef4ff;border:1px solid #bdd3fc;'
+                    'border-radius:10px;padding:.6rem 1rem;font-size:.8rem;'
+                    'color:#1a56db;margin-bottom:.75rem;">'
+                    '<strong>Two-phase ensemble pipeline</strong> &mdash; '
+                    'TF-IDF + LogReg on all rows &rarr; Voting Ensemble '
+                    '(word + char + SGD) on low-confidence rows. Fully offline.'
+                    '</div>', unsafe_allow_html=True)
+
+                _ct = st.slider("Auto-accept threshold",0.5,1.0,0.80,0.01,key="al_ct")
+
+                if st.button("Run Auto-Labeling", key="al_run",
+                             use_container_width=True):
+                    _texts = _df2[_tc2].fillna("").astype(str).tolist()
+                    _mode2 = st.session_state.al_mode
+                    _preds = [""]*len(_texts)
+                    _confs = [0.0]*len(_texts)
+                    _srcs  = ["tfidf"]*len(_texts)
+                    try:
+                        _ens_thresh = st.session_state.get("al_ensemble_thresh", 0.72)
+
+                        # ── Phase 1: TF-IDF + LogReg (fast pass, all rows) ────
+                        _ph1 = st.status("Phase 1 — TF-IDF + LogReg (all rows)", expanded=True)
+                        with _ph1:
+                            if _mode2 == "supervised":
+                                _lbls  = st.session_state.al_labels
+                                _seeds = st.session_state.get("al_seed_data", {})
+                                _tx, _ty = [], []
+                                for _l in _lbls:
+                                    for _e in [s.strip() for s in _seeds.get(_l,"").splitlines() if s.strip()]:
+                                        _tx.append(_e); _ty.append(_l)
+                                for _l in _lbls:
+                                    _tx.append(_l); _ty.append(_l)
+                                _v1  = TfidfVectorizer(max_features=10000, ngram_range=(1,2), sublinear_tf=True)
+                                _v1.fit(_texts + _tx)
+                                _cl1 = LogisticRegression(max_iter=1000, C=2.0, solver="saga", n_jobs=N_JOBS)
+                                _cl1.fit(_v1.transform(_tx), _ty)
+                                _pr1   = _cl1.predict_proba(_v1.transform(_texts))
+                                _preds = list(_cl1.classes_[_pr1.argmax(axis=1)])
+                                _confs = list(_pr1.max(axis=1).astype(float))
+                                st.session_state.al_trained_model = _cl1
+                                st.session_state.al_trained_vec   = _v1
+                            else:
+                                from sklearn.cluster import KMeans
+                                from sklearn.preprocessing import normalize as _nm
+                                _nc2 = st.session_state.get("al_n_clusters", 5)
+                                _v1  = TfidfVectorizer(max_features=6000, ngram_range=(1,2), sublinear_tf=True)
+                                _Xa  = _v1.fit_transform(_texts)
+                                _km  = KMeans(n_clusters=_nc2, random_state=42, n_init=12)
+                                _km.fit(_Xa)
+                                _preds = [f"cluster_{c}" for c in _km.labels_]
+                                _lbls  = [f"cluster_{i}" for i in range(_nc2)]
+                                st.session_state.al_labels = _lbls
+                                _Xn = (_nm(_Xa.toarray()))
+                                _Cn = _nm(_km.cluster_centers_)
+                                _confs = list((_Xn @ _Cn.T).max(axis=1).astype(float))
+                            _nlow = sum(1 for c in _confs if c < _ens_thresh)
+                            st.write(f"Phase 1 done — {len(_texts)-_nlow:,} high-confidence, "
+                                     f"{_nlow:,} rows need ensemble refinement")
+                        _ph1.update(label="Phase 1 complete ✓", state="complete")
+
+                        # ── Phase 2: Voting Ensemble (low-confidence rows only) ──
+                        if _mode2 == "supervised" and _nlow > 0:
+                            _low_idx = [i for i, c in enumerate(_confs) if c < _ens_thresh]
+                            _ph2 = st.status(
+                                f"Phase 2 — Voting Ensemble refining {len(_low_idx):,} rows",
+                                expanded=True)
+                            with _ph2:
+                                _pg2 = st.progress(0, "Building ensemble (word + char + SGD)...")
+                                _predict_fn, _ens_classes = _build_ensemble(
+                                    _texts, _tx, _ty)
+                                _pg2.progress(0.4, "Running ensemble on low-confidence rows...")
+                                _low_texts  = [_texts[i] for i in _low_idx]
+                                _ens_proba, _ = _predict_fn(_low_texts)
+                                for _k, _idx in enumerate(_low_idx):
+                                    _best_cls = int(_ens_proba[_k].argmax())
+                                    _ens_conf = float(_ens_proba[_k].max())
+                                    # Only override if ensemble is more confident
+                                    if _ens_conf > _confs[_idx]:
+                                        _preds[_idx] = str(_ens_classes[_best_cls])
+                                        _confs[_idx] = _ens_conf
+                                        _srcs[_idx]  = "ensemble"
+                                _pg2.progress(1.0, "Ensemble done")
+                                _upgraded = sum(1 for s in _srcs if s == "ensemble")
+                                st.write(f"Ensemble upgraded confidence on {_upgraded:,} rows")
+                            _ph2.update(label="Phase 2 complete ✓", state="complete")
+
+                        _res = _df2.copy()
+                        _res["__predicted_label"] = _preds
+                        _res["__confidence"]      = np.round(np.array(_confs, dtype=float), 4)
+                        _res["__source"]          = _srcs
+                        _res["__status"]          = [
+                            "auto-accepted" if c >= _ct else "needs review"
+                            for c in _confs]
+                        st.session_state.al_results   = _res
+                        st.session_state.al_review_df = _res.copy()
+                        st.success("Auto-labeling complete! Check the Review Queue tab.")
+                    except Exception as _err:
+                        st.error(f"Error: {_err}")
+                        st.exception(_err)
+
+
+                if st.session_state.al_results is not None:
+                    _r = st.session_state.al_results
+                    _s1c,_s2c,_s3c,_s4c,_s5c = st.columns(5)
+                    _nacc = (_r["__status"]=="auto-accepted").sum()
+                    _nrev = (_r["__status"]=="needs review").sum()
+                    _nens = int((_r["__source"] == "ensemble").sum()) if "__source" in _r.columns else 0
+                    for _col,_val,_lbl,_cls in [
+                        (_s1c,len(_r),"Total",""),
+                        (_s2c,_nacc,"Accepted","green"),
+                        (_s3c,_nrev,"Review","gold"),
+                        (_s4c,f'{float(_r["__confidence"].mean()):.0%}',"Avg Conf",""),
+                        (_s5c,_nens,"Ensemble Ph2","purple"),
+                    ]:
+                        _col.markdown(
+                            f'<div class="als-stat"><div class="als-stat-val {_cls}">{_val}</div>'
+                            f'<div class="als-stat-lbl">{_lbl}</div></div>',
+                            unsafe_allow_html=True)
+                    _ch1,_ch2,_ch3 = st.columns(3)
+                    with _ch1:
+                        _vc = _r["__predicted_label"].value_counts()
+                        _fg,_ax = plt.subplots(figsize=(4,max(2.5,len(_vc)*.4)))
+                        _ax.barh(_vc.index,_vc.values,color=C_BLUE,edgecolor="white")
+                        _ax.set_title("Label Distribution"); _fg.tight_layout()
+                        st.pyplot(_fg); plt.close(_fg)
+                    with _ch2:
+                        _fg2,_ax2 = plt.subplots(figsize=(4,3))
+                        _ax2.hist(_r["__confidence"],bins=20,color=C_BLUE,alpha=.8,edgecolor="white")
+                        _ens_thr = st.session_state.get("al_ensemble_thresh", 0.72)
+                        _ax2.axvline(_ct, color=C_RED, lw=1.5, linestyle="--", label="Accept threshold")
+                        _ax2.axvline(_ens_thr, color=C_PURPLE, lw=1.5, linestyle=":", label="Ensemble handoff")
+                        _ax2.legend(fontsize=8); _ax2.set_title("Confidence Dist"); _fg2.tight_layout()
+                        st.pyplot(_fg2); plt.close(_fg2)
+                    with _ch3:
+                        if "__source" in _r.columns:
+                            _sc = _r["__source"].value_counts()
+                            _fg3,_ax3 = plt.subplots(figsize=(4,3))
+                            _ax3.pie(_sc.values,labels=[s.replace("tfidf","TF-IDF").replace("ensemble","Ensemble") for s in _sc.index],
+                                     colors=[C_BLUE,C_PURPLE,C_GOLD,C_GREEN][:len(_sc)],
+                                     autopct="%1.0f%%",startangle=90)
+                            _ax3.set_title("Source Split"); _fg3.tight_layout()
+                            st.pyplot(_fg3); plt.close(_fg3)
+
+        # ── TAB 3 REVIEW QUEUE ───────────────────────────────────
+        with al_tab3:
+            if st.session_state.al_review_df is None:
+                st.info("Run Auto-Labeling first (Tab 2) to populate the review queue.")
+            else:
+                _rdf = st.session_state.al_review_df
+                _tc3 = st.session_state.al_text_col
+                _lb3 = st.session_state.al_labels
+                _rf1,_rf2,_rf3 = st.columns(3)
+                with _rf1:
+                    _sh = st.selectbox("Show",["All","Needs Review","Auto-Accepted"],key="al_shf")
+                with _rf2:
+                    _so = st.selectbox("Sort by",["Confidence (low first)","Confidence (high first)","Row order"],key="al_sof")
+                with _rf3:
+                    _lf = st.selectbox("Filter label",["All"]+list(_lb3),key="al_lff")
+                _vw = _rdf.copy()
+                if _sh == "Needs Review": _vw = _vw[_vw["__status"]=="needs review"]
+                elif _sh == "Auto-Accepted": _vw = _vw[_vw["__status"]=="auto-accepted"]
+                if _lf != "All": _vw = _vw[_vw["__predicted_label"]==_lf]
+                if "low" in _so: _vw = _vw.sort_values("__confidence",ascending=True)
+                elif "high" in _so: _vw = _vw.sort_values("__confidence",ascending=False)
+                st.caption(f"Showing **{len(_vw):,}** of **{len(_rdf):,}** rows")
+                _ecols = [c for c in [_tc3,"__predicted_label","__confidence","__source","__status"] if c in _rdf.columns]
+                _edf = _vw[_ecols].reset_index(drop=False).rename(columns={"index":"_row_id"})
+                _ed = st.data_editor(_edf, column_config={
+                    "_row_id": st.column_config.NumberColumn("Row",disabled=True,width="small"),
+                    _tc3: st.column_config.TextColumn("Text",disabled=True,width="large"),
+                    "__predicted_label": st.column_config.SelectboxColumn("Label",options=_lb3,width="medium"),
+                    "__confidence": st.column_config.NumberColumn("Conf",format="%.3f",disabled=True,width="small"),
+                    "__source": st.column_config.TextColumn("Source",disabled=True,width="small"),
+                    "__status": st.column_config.TextColumn("Status",disabled=True,width="medium"),
+                }, use_container_width=True, hide_index=True, num_rows="fixed", key="al_de")
+                if st.button("Save Corrections", key="al_sv"):
+                    _ch = 0
+                    for _,_row in _ed.iterrows():
+                        _oi = int(_row["_row_id"])
+                        _nl = _row["__predicted_label"]
+                        if _oi in st.session_state.al_review_df.index:
+                            _ol = st.session_state.al_review_df.at[_oi,"__predicted_label"]
+                            st.session_state.al_review_df.at[_oi,"__predicted_label"] = _nl
+                            if _nl != _ol:
+                                st.session_state.al_review_df.at[_oi,"__status"] = "corrected"
+                                _ch += 1
+                    st.success(f"Saved! {_ch} label(s) corrected.")
+                    st.rerun()
+                with st.expander("Active Learning — Most Uncertain Samples"):
+                    _un = _rdf.nsmallest(10,"__confidence")[[_tc3,"__predicted_label","__confidence","__status"]]
+                    st.dataframe(_un,use_container_width=True)
+
+        # ── TAB 4 EXPORT ─────────────────────────────────────────
+        with al_tab4:
+            if st.session_state.al_review_df is None:
+                st.info("Complete auto-labeling first.")
+            else:
+                _exp = st.session_state.al_review_df.copy()
+                _ea=(_exp["__status"]=="auto-accepted").sum()
+                _ec=(_exp["__status"]=="corrected").sum()
+                _ep=(_exp["__status"]=="needs review").sum()
+                _eo=int((_exp["__source"]=="ensemble").sum()) if "__source" in _exp.columns else 0
+                _e1,_e2,_e3,_e4,_e5 = st.columns(5)
+                for _col,_val,_lbl,_cls in [
+                    (_e1,len(_exp),"Total",""),(_e2,_ea,"Accepted","green"),
+                    (_e3,_ec,"Corrected",""),(_e4,_ep,"Pending","gold"),(_e5,_eo,"Ensemble","purple")]:
+                    _col.markdown(f'<div class="als-stat"><div class="als-stat-val {_cls}">{_val}</div>'
+                                  f'<div class="als-stat-lbl">{_lbl}</div></div>',unsafe_allow_html=True)
+                st.markdown('<div class="dm-divider"></div>',unsafe_allow_html=True)
+                _ex1,_ex2 = st.columns(2)
+                with _ex1:
+                    _es = st.radio("Export scope",["All rows","Confirmed only"],key="al_es")
+                with _ex2:
+                    _lc = st.text_input("Label column name",value="label",key="al_lc")
+                if "Confirmed" in _es: _exp = _exp[_exp["__status"]!="needs review"]
+                _exp = _exp.rename(columns={"__predicted_label":_lc})
+                _exp = _exp.drop(columns=["__status","__confidence","__source"],errors="ignore")
+                st.download_button("Download Labeled CSV",
+                    data=_exp.to_csv(index=False).encode("utf-8"),
+                    file_name="datamind_labeled.csv",mime="text/csv",key="al_dl")
+                st.dataframe(_exp.head(20),use_container_width=True)
+
+    # ════════════════════════════════════════════════════════════
+    #  IMAGE LABELING — MobileNetV2 (100% offline, tf.keras)
+    # ════════════════════════════════════════════════════════════
+    else:
+        _img_tab1, _img_tab2, _img_tab3 = st.tabs(
+            ["⚙️  Setup & Upload", "🔍  Classify & Label", "📥  Export"])
+
+        # ── ImageNet top-1000 class names (shortened) ────────────────────
+        # Full list loaded lazily from keras only when needed
+        def _get_mobilenet(extractor_only=False):
+            """Load and cache MobileNetV2. Returns (full_model, feature_extractor)."""
+            try:
+                import tensorflow as _tf
+                if st.session_state.get("al_mobilenet_model") is None:
+                    with st.spinner("Loading MobileNetV2 weights (~14 MB, one time)..."):
+                        _full  = _tf.keras.applications.MobileNetV2(
+                            weights="imagenet", include_top=True)
+                        _feat  = _tf.keras.Model(
+                            inputs =_full.input,
+                            outputs=_full.layers[-2].output)  # 1280-dim embeddings
+                        st.session_state.al_mobilenet_model    = _full
+                        st.session_state.al_mobilenet_extractor= _feat
+                return (st.session_state.al_mobilenet_model,
+                        st.session_state.al_mobilenet_extractor)
+            except Exception as _me:
+                st.error(f"TensorFlow error: {_me}")
+                return None, None
+
+        def _preprocess_image(image_bytes, target_size=(224, 224)):
+            """Decode bytes → preprocessed numpy array for MobileNetV2."""
+            import tensorflow as _tf
+            import numpy as _np2
+            from PIL import Image as _PILI
+            import io as _imgio
+            img = _PILI.open(_imgio.BytesIO(image_bytes)).convert("RGB").resize(target_size)
+            arr = _np2.array(img, dtype=_np2.float32)
+            arr = _tf.keras.applications.mobilenet_v2.preprocess_input(arr)
+            return arr[_np2.newaxis, ...]   # (1, 224, 224, 3)
+
+        def _imagenet_predict(model, image_bytes, top_k=3):
+            """Run MobileNetV2 on one image. Returns list of (class_name, score) tuples."""
+            import tensorflow as _tf
+            _arr   = _preprocess_image(image_bytes)
+            _preds = model.predict(_arr, verbose=0)
+            _dec   = _tf.keras.applications.mobilenet_v2.decode_predictions(
+                _preds, top=top_k)[0]
+            return [(cls_name.replace("_", " "), float(score))
+                    for (_, cls_name, score) in _dec]
+
+        def _extract_features(extractor, image_bytes):
+            """Return 1280-dim feature vector for custom-label matching."""
+            import numpy as _np2
+            _arr = _preprocess_image(image_bytes)
+            return extractor.predict(_arr, verbose=0)[0]  # (1280,)
+
+        def _cosine_sim(a, b):
+            import numpy as _np2
+            na, nb = _np2.linalg.norm(a), _np2.linalg.norm(b)
+            if na == 0 or nb == 0: return 0.0
+            return float(_np2.dot(a, b) / (na * nb))
+
+        # ── IMG TAB 1 SETUP ──────────────────────────────────────────────
+        with _img_tab1:
+            st.markdown(
+                '<div class="als-section">'
+                '<div class="als-section-title">Model & Mode</div>',
+                unsafe_allow_html=True)
+            st.markdown(
+                '<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;'
+                'padding:.75rem 1rem;font-size:.82rem;color:#166534;margin-bottom:.8rem">'
+                '&#9989; <strong>MobileNetV2</strong> — pretrained on ImageNet 1000 classes. '
+                'Weights download once (~14 MB) and are cached by Keras. '
+                'Runs on CPU via tensorflow-cpu already in requirements — '
+                'no extra packages needed.</div>',
+                unsafe_allow_html=True)
+
+            _img_mode = st.radio(
+                "Labeling mode",
+                ["ImageNet (1000 built-in classes)",
+                 "Custom labels (your own class names)"],
+                key="al_img_mode_sel",
+                help=("ImageNet: model directly predicts one of 1000 classes. "
+                      "Custom: you define labels, model matches via feature similarity."))
+            st.session_state.al_img_mode = (
+                "imagenet" if "ImageNet" in _img_mode else "custom")
+
+            _ec1, _ec2 = st.columns(2)
+            with _ec1:
+                _top_k = st.slider("Top-K predictions per image", 1, 10, 3, key="al_topk")
+                st.session_state.al_top_k = _top_k
+            with _ec2:
+                _conf_thresh = st.slider("Minimum confidence threshold",
+                                          0.05, 0.95, 0.35, 0.05, key="al_img_conf_sl")
+                st.session_state.al_img_conf = _conf_thresh
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if st.session_state.al_img_mode == "custom":
+                st.markdown(
+                    '<div class="als-section">'
+                    '<div class="als-section-title">Custom Labels</div>',
+                    unsafe_allow_html=True)
+                st.caption(
+                    "Enter one label per line. For each label upload 1-5 reference images — "
+                    "MobileNetV2 extracts their features and matches new images by cosine similarity.")
+                _custom_raw = st.text_area(
+                    "Your labels (one per line)",
+                    placeholder="cat\ndog\ncar\nperson",
+                    height=100, key="al_custom_labels")
+                st.session_state.al_img_labels = [
+                    l.strip() for l in _custom_raw.splitlines() if l.strip()]
+
+                if st.session_state.al_img_labels:
+                    st.markdown("**Upload reference images per label (optional but improves accuracy):**")
+                    _ref_imgs = {}
+                    for _lbl in st.session_state.al_img_labels[:10]:  # max 10 labels
+                        _refs = st.file_uploader(
+                            f"References for '{_lbl}'",
+                            type=["jpg","jpeg","png","webp"],
+                            accept_multiple_files=True,
+                            key=f"al_ref_{_lbl}")
+                        if _refs:
+                            _ref_imgs[_lbl] = _refs
+                    st.session_state["al_ref_imgs"] = _ref_imgs
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown(
+                '<div class="als-section">'
+                '<div class="als-section-title">Upload Images to Label</div>',
+                unsafe_allow_html=True)
+            _uploaded = st.file_uploader(
+                "Upload images (JPG, PNG, WEBP)",
+                type=["jpg","jpeg","png","webp"],
+                accept_multiple_files=True, key="al_img_up")
+            if _uploaded:
+                # Validate each file is a readable image before displaying
+                _valid_files = []
+                _bad_files   = []
+                for _uf in _uploaded:
+                    try:
+                        from PIL import Image as _PILImg
+                        _uf.seek(0)
+                        _PILImg.open(_uf).verify()
+                        _uf.seek(0)
+                        _valid_files.append(_uf)
+                    except Exception:
+                        _uf.seek(0)
+                        _bad_files.append(_uf.name)
+                if _bad_files:
+                    st.warning(f"⚠️ Skipped {len(_bad_files)} unreadable file(s): {', '.join(_bad_files)}")
+                if _valid_files:
+                    st.session_state.al_img_files = _valid_files
+                    st.markdown(
+                        f'<span class="dm-badge green">{len(_valid_files)} valid image(s) ready</span>',
+                        unsafe_allow_html=True)
+                    _prev_cols = st.columns(min(4, len(_valid_files)))
+                    for _i, _f in enumerate(list(_valid_files)[:4]):
+                        try:
+                            _f.seek(0)
+                            _prev_cols[_i].image(_f.read(), caption=_f.name, use_container_width=True)
+                            _f.seek(0)
+                        except Exception:
+                            _prev_cols[_i].warning(f"Cannot preview: {_f.name}")
+                    if len(_valid_files) > 4:
+                        st.caption(f"...and {len(_valid_files)-4} more")
+                else:
+                    st.error("No valid images found. Please upload JPG, PNG or WEBP files.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── IMG TAB 2 CLASSIFY ───────────────────────────────────────────
+        with _img_tab2:
+            if not st.session_state.al_img_files:
+                st.markdown(
+                    '<div style="text-align:center;padding:3rem;color:#94a3b8;">'
+                    '<div style="font-size:2.5rem;margin-bottom:.5rem">&#128247;</div>'
+                    '<div style="font-size:.9rem">Upload images in the Setup tab first</div>'
+                    '</div>', unsafe_allow_html=True)
+            else:
+                _nim  = len(st.session_state.al_img_files)
+                _mode = st.session_state.al_img_mode
+                _topk = st.session_state.al_top_k
+                _cthr = st.session_state.al_img_conf
+
+                st.markdown(
+                    f'<div style="background:#f0fdf4;border:1px solid #86efac;'
+                    f'border-radius:10px;padding:.7rem 1rem;font-size:.8rem;'
+                    f'color:#166534;margin-bottom:1rem;">'
+                    f'{_nim} image(s) &middot; '
+                    f'Mode: <strong>{"ImageNet 1000" if _mode=="imagenet" else "Custom labels"}</strong>'
+                    f' &middot; Top-K: <strong>{_topk}</strong>'
+                    f' &middot; Min confidence: <strong>{_cthr:.0%}</strong>'
+                    f'</div>', unsafe_allow_html=True)
+
+                if st.button("Run MobileNetV2 Classification", key="al_yrun",
+                             use_container_width=True, type="primary"):
+                    _full_mdl, _feat_mdl = _get_mobilenet()
+                    if _full_mdl is None:
+                        st.error("Failed to load MobileNetV2. Check TensorFlow installation.")
+                    else:
+                        _results_list = []
+                        _prog = st.progress(0, "Classifying images...")
+                        try:
+                            # Build custom label embeddings if needed
+                            _label_embeddings = {}
+                            if _mode == "custom":
+                                _ref_imgs = st.session_state.get("al_ref_imgs", {})
+                                import numpy as _np2
+                                for _lbl in st.session_state.al_img_labels:
+                                    _refs = _ref_imgs.get(_lbl, [])
+                                    if _refs:
+                                        _feats = [_extract_features(_feat_mdl, r.read())
+                                                  for r in _refs]
+                                        _label_embeddings[_lbl] = _np2.mean(_feats, axis=0)
+                                    else:
+                                        # No reference images — use label name as proxy
+                                        # (zero vector means cosine sim will be 0)
+                                        _label_embeddings[_lbl] = _np2.zeros(1280)
+
+                            for _ii, _img_file in enumerate(st.session_state.al_img_files):
+                                _img_bytes = _img_file.read()
+                                _prog.progress(
+                                    _ii / _nim,
+                                    text=f"Classifying: {_img_file.name} ({_ii+1}/{_nim})"
+                                )
+
+                                if _mode == "imagenet":
+                                    _preds_raw = _imagenet_predict(_full_mdl, _img_bytes, _topk)
+                                    _boxes = [
+                                        {"class": cls, "confidence": round(sc, 4),
+                                         "x1": 0, "y1": 0, "x2": 0, "y2": 0}
+                                        for cls, sc in _preds_raw if sc >= _cthr
+                                    ]
+                                    _top_label = _preds_raw[0][0] if _preds_raw else "unknown"
+                                    _top_conf  = _preds_raw[0][1] if _preds_raw else 0.0
+
+                                else:  # custom labels via feature similarity
+                                    import numpy as _np2
+                                    _feat_vec = _extract_features(_feat_mdl, _img_bytes)
+                                    _sims = {
+                                        lbl: _cosine_sim(_feat_vec, emb)
+                                        for lbl, emb in _label_embeddings.items()
+                                    }
+                                    _sorted_sims = sorted(_sims.items(), key=lambda x: -x[1])
+                                    _boxes = [
+                                        {"class": cls, "confidence": round(sc, 4),
+                                         "x1": 0, "y1": 0, "x2": 0, "y2": 0}
+                                        for cls, sc in _sorted_sims[:_topk] if sc >= _cthr
+                                    ]
+                                    _top_label = _sorted_sims[0][0] if _sorted_sims else "unknown"
+                                    _top_conf  = _sorted_sims[0][1] if _sorted_sims else 0.0
+
+                                # Annotate — pure Pillow only, no cv2/libGL needed
+                                from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
+                                import io as _imgio
+                                _pil     = _PILImg.open(_imgio.BytesIO(_img_bytes)).convert("RGB")
+                                _ann_pil = _pil.copy()
+                                _draw    = _PILDraw.Draw(_ann_pil)
+                                _lbl_txt = f"{_top_label}  {_top_conf:.0%}"
+                                _draw.rectangle([0, 0, _ann_pil.width, 36], fill=(26, 86, 219))
+                                try:
+                                    _font = _PILFont.truetype(
+                                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+                                except Exception:
+                                    _font = _PILFont.load_default()
+                                _draw.text((8, 8), _lbl_txt, fill=(255, 255, 255), font=_font)
+                                _ann_buf = _imgio.BytesIO()
+                                _ann_pil.save(_ann_buf, format="PNG")
+
+                                _results_list.append({
+                                    "filename":  _img_file.name,
+                                    "boxes":     _boxes,
+                                    "n_objects": len(_boxes),
+                                    "classes":   [b["class"] for b in _boxes],
+                                    "top_label": _top_label,
+                                    "top_conf":  round(_top_conf, 4),
+                                    "img_bytes": _img_bytes,
+                                    "ann_bytes": _ann_buf.getvalue(),
+                                })
+                                _prog.progress(
+                                    (_ii + 1) / _nim,
+                                    text=f"Done: {_img_file.name} ({_ii+1}/{_nim})")
+
+                            _prog.empty()
+                            st.session_state.al_img_results = _results_list
+                            st.success(f"Classification complete on {_nim} image(s)!")
+
+                        except ImportError as _ie:
+                            st.error(f"Missing dependency: {_ie}. "
+                                     "Ensure tensorflow-cpu is installed (already in requirements.txt).")
+                        except Exception as _ye:
+                            st.error(f"Classification error: {_ye}")
+                            st.exception(_ye)
+
+                # ── Results display ──────────────────────────────────────
+                if st.session_state.al_img_results:
+                    _res_list = st.session_state.al_img_results
+                    _tot_preds = sum(r["n_objects"] for r in _res_list)
+                    _all_cls   = {}
+                    for _r in _res_list:
+                        for _b in _r["boxes"]:
+                            _all_cls[_b["class"]] = _all_cls.get(_b["class"], 0) + 1
+                    _avg_conf = (sum(r["top_conf"] for r in _res_list) / len(_res_list)
+                                 if _res_list else 0)
+
+                    _ki1, _ki2, _ki3, _ki4 = st.columns(4)
+                    for _col, _val, _lbl, _cls in [
+                        (_ki1, _nim,                          "Images",       ""),
+                        (_ki2, _tot_preds,                    "Predictions",  "green"),
+                        (_ki3, len(_all_cls),                 "Unique Labels","purple"),
+                        (_ki4, f"{_avg_conf:.0%}",            "Avg Confidence","gold"),
+                    ]:
+                        _col.markdown(
+                            f'<div class="als-stat">'
+                            f'<div class="als-stat-val {_cls}">{_val}</div>'
+                            f'<div class="als-stat-lbl">{_lbl}</div></div>',
+                            unsafe_allow_html=True)
+
+                    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+
+                    if _all_cls:
+                        _clsc1, _clsc2 = st.columns([1, 2])
+                        with _clsc1:
+                            st.markdown('<div class="als-section-title" '
+                                        'style="color:#374151;font-size:.8rem;">Label Distribution</div>',
+                                        unsafe_allow_html=True)
+                            _srt = dict(sorted(_all_cls.items(), key=lambda x: -x[1])[:20])
+                            _fgc, _axc = plt.subplots(figsize=(4, max(2.5, len(_srt) * 0.35)))
+                            _axc.barh(list(_srt.keys()), list(_srt.values()),
+                                      color=C_BLUE, edgecolor="white")
+                            _axc.set_xlabel("Count")
+                            _fgc.tight_layout()
+                            st.pyplot(_fgc)
+                            plt.close(_fgc)
+                        with _clsc2:
+                            st.markdown('<div class="als-section-title" '
+                                        'style="color:#374151;font-size:.8rem;">Top Predictions</div>',
+                                        unsafe_allow_html=True)
+                            _summary_rows = [
+                                {"Image": r["filename"],
+                                 "Top Label": r["top_label"],
+                                 "Confidence": f"{r['top_conf']:.1%}",
+                                 "All Predictions": ", ".join(
+                                     f"{b['class']} ({b['confidence']:.0%})"
+                                     for b in r["boxes"][:3])}
+                                for r in _res_list
+                            ]
+                            st.dataframe(pd.DataFrame(_summary_rows),
+                                         use_container_width=True, hide_index=True)
+
+                    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+                    st.markdown('<div class="als-section-title" '
+                                'style="color:#374151;font-size:.8rem;margin-bottom:.75rem;">'
+                                'Per-Image Results</div>', unsafe_allow_html=True)
+
+                    for _ri, _rr in enumerate(_res_list):
+                        with st.expander(
+                            f"{_rr['filename']} — {_rr['top_label']} ({_rr['top_conf']:.0%})",
+                            expanded=(_ri == 0)):
+                            _rc1, _rc2 = st.columns(2)
+                            with _rc1:
+                                st.markdown("**Original**")
+                                st.image(_rr["img_bytes"], use_container_width=True)
+                            with _rc2:
+                                st.markdown("**Annotated**")
+                                st.image(_rr["ann_bytes"], use_container_width=True)
+                            if _rr["boxes"]:
+                                st.dataframe(
+                                    pd.DataFrame(_rr["boxes"])[["class", "confidence"]],
+                                    use_container_width=True, hide_index=True)
+                            else:
+                                st.caption("No predictions above confidence threshold.")
+
+        # ── IMG TAB 3 EXPORT ─────────────────────────────────────────────
+        with _img_tab3:
+            if not st.session_state.al_img_results:
+                st.info("Run classification first (Classify & Label tab).")
+            else:
+                _exp_list = st.session_state.al_img_results
+                _rows = []
+                for _rr in _exp_list:
+                    if _rr["boxes"]:
+                        for _bb in _rr["boxes"]:
+                            _rows.append({
+                                "filename":   _rr["filename"],
+                                "label":      _bb["class"],
+                                "confidence": _bb["confidence"],
+                            })
+                    else:
+                        _rows.append({
+                            "filename": _rr["filename"],
+                            "label": "no_prediction",
+                            "confidence": 0.0})
+
+                _df_exp = pd.DataFrame(_rows)
+                _ei1, _ei2, _ei3 = st.columns(3)
+                _ei1.markdown(
+                    f'<div class="als-stat"><div class="als-stat-val">{len(_exp_list)}</div>'
+                    f'<div class="als-stat-lbl">Images</div></div>', unsafe_allow_html=True)
+                _ei2.markdown(
+                    f'<div class="als-stat"><div class="als-stat-val green">'
+                    f'{len(_df_exp)}</div>'
+                    f'<div class="als-stat-lbl">Total Labels</div></div>', unsafe_allow_html=True)
+                _ei3.markdown(
+                    f'<div class="als-stat"><div class="als-stat-val purple">'
+                    f'{_df_exp["label"].nunique()}</div>'
+                    f'<div class="als-stat-lbl">Unique Classes</div></div>', unsafe_allow_html=True)
+
+                st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+                st.download_button(
+                    "Download Labels CSV",
+                    data=_df_exp.to_csv(index=False).encode("utf-8"),
+                    file_name="datamind_image_labels.csv",
+                    mime="text/csv", key="al_img_dl")
+                st.dataframe(_df_exp, use_container_width=True, hide_index=True)
+
+
+elif page == "🛡️ Admin Panel":
+    # ── Only accessible if admin=True ────────────────────────────────────
+    if not st.session_state.auth_is_admin:
+        st.error("Access denied. Admin only.")
+        st.stop()
+
+    st.markdown(
+        '<div class="dm-pagehead"><div class="icon">🛡️</div>'
+        '<div><div class="title">Admin Panel</div>'
+        '<div class="sub">Manage users, premium status and payments</div>'
+        '</div></div>', unsafe_allow_html=True)
+
+    if not RTDB_OK:
+        st.error(
+            "Firebase Realtime Database is not connected. "
+            "Fill in _FB_CONFIG and check your databaseURL.")
+        st.stop()
+
+    # ── Refresh button ────────────────────────────────────────────────────
+    _col_refresh, _ = st.columns([1, 4])
+    with _col_refresh:
+        if st.button("Refresh Users", key="admin_refresh"):
+            st.rerun()
+
+    # ── Load all users ────────────────────────────────────────────────────
+    _all_users = _rtdb_get_all_users()
+
+    if not _all_users:
+        st.info("No users found in the Realtime Database yet.")
+        st.stop()
+
+    # ── Summary KPIs ──────────────────────────────────────────────────────
+    _total   = len(_all_users)
+    _premium = sum(1 for u in _all_users if u.get("plan") == "premium")
+    _pending = sum(1 for u in _all_users if u.get("plan") == "pending_review")
+    _free    = _total - _premium - _pending
+    _admins  = sum(1 for u in _all_users if u.get("admin", False))
+
+    _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+    _k1.markdown(
+        '<div class="dm-kpi"><div class="val">' + str(_total) + '</div>'
+        '<div class="lbl">Total Users</div></div>', unsafe_allow_html=True)
+    _k2.markdown(
+        '<div class="dm-kpi green"><div class="val">' + str(_premium) + '</div>'
+        '<div class="lbl">Premium</div></div>', unsafe_allow_html=True)
+    _k3.markdown(
+        '<div class="dm-kpi"><div class="val">' + str(_free) + '</div>'
+        '<div class="lbl">Free</div></div>', unsafe_allow_html=True)
+    _k4.markdown(
+        '<div class="dm-kpi gold"><div class="val">' + str(_admins) + '</div>'
+        '<div class="lbl">Admins</div></div>', unsafe_allow_html=True)
+    _k5.markdown(
+        '<div class="dm-kpi" style="border-color:#fde68a;">'
+        '<div class="val" style="color:#d97706;">' + str(_pending) + '</div>'
+        '<div class="lbl">⏳ Pending Review</div></div>', unsafe_allow_html=True)
+
+    # ── Pending payment approvals ─────────────────────────────────────────
+    _pending_users = [u for u in _all_users if u.get("plan") == "pending_review"]
+    if _pending_users:
+        st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="dm-card-title" style="color:#d97706;">⏳ Pending Payment Approvals ({len(_pending_users)})</div>',
+            unsafe_allow_html=True)
+        st.warning(
+            "These users have submitted a UTR for verification. "
+            "Check your UPI app / bank statement before approving.")
+        for _pu in _pending_users:
+            _p_uid   = _pu.get("_uid", "")
+            _p_email = _pu.get("email", "unknown")
+            _p_utr   = _pu.get("last_utr", "—")
+            _p_ts    = _pu.get("payment_ts", "")[:16].replace("T", " ")
+            with st.expander(f"🟡 {_p_email}  ·  UTR: {_p_utr}  ·  Submitted: {_p_ts}"):
+                st.markdown(
+                    f'<div style="font-size:.8rem;margin-bottom:.75rem;">'
+                    f'<b>UID:</b> <code>{_p_uid}</code>&nbsp;&nbsp;'
+                    f'<b>UTR:</b> <code>{_p_utr}</code>&nbsp;&nbsp;'
+                    f'<b>Submitted:</b> {_p_ts}</div>',
+                    unsafe_allow_html=True)
+                _pa1, _pa2 = st.columns(2)
+                with _pa1:
+                    if st.button(f"✅ Approve — Grant Premium", key="approve_" + _p_uid):
+                        _paid_until = (
+                            datetime.datetime.utcnow() +
+                            datetime.timedelta(days=30)).isoformat()
+                        _rtdb_update_user(_p_uid, {
+                            "plan":       "premium",
+                            "paid_until": _paid_until,
+                            "proj_used":  0,
+                        })
+                        st.success(f"Premium granted to {_p_email}.")
+                        st.rerun()
+                with _pa2:
+                    if st.button(f"❌ Reject — Move to Free", key="reject_" + _p_uid):
+                        _rtdb_update_user(_p_uid, {
+                            "plan":     "free",
+                            "last_utr": "",
+                        })
+                        st.warning(f"{_p_email} moved back to Free.")
+                        st.rerun()
+    else:
+        st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+        st.success("✅ No pending payment approvals.")
+    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+
+    # ── User table + individual controls ─────────────────────────────────
+    st.markdown('<div class="dm-card-title">All Users</div>',
+                unsafe_allow_html=True)
+
+    for _u in _all_users:
+        _uid   = _u.get("_uid", "")
+        _email = _u.get("email", "unknown")
+        _plan  = _u.get("plan", "free")
+        _admin = bool(_u.get("admin", False))
+        _used  = _u.get("proj_used", 0)
+        _pu    = _u.get("paid_until", None)
+        _utr   = _u.get("last_utr", "")
+        _login = _u.get("last_login", "")[:16].replace("T", " ")
+        _join  = _u.get("created_at", "")[:10]
+
+        _plan_color  = "#047857" if _plan == "premium" else "#6b7280"
+        _admin_badge = (
+            '<span style="background:#fef3c7;color:#b45309;border-radius:20px;'
+            'padding:2px 8px;font-size:.65rem;font-weight:700;margin-left:6px;">'
+            'ADMIN</span>' if _admin else "")
+
+        with st.expander(
+                _email + (" [ADMIN]" if _admin else "") +
+                " — " + _plan.upper(), expanded=False):
+
+            _ic1, _ic2, _ic3 = st.columns(3)
+            _ic1.markdown(
+                '<div class="dm-kpi"><div class="val" style="font-size:1rem;color:'
+                + _plan_color + '">' + _plan.capitalize() + '</div>'
+                '<div class="lbl">Plan</div></div>', unsafe_allow_html=True)
+            _ic2.markdown(
+                '<div class="dm-kpi"><div class="val" style="font-size:1rem">'
+                + str(_used) + '</div>'
+                '<div class="lbl">Projects Used</div></div>',
+                unsafe_allow_html=True)
+            _ic3.markdown(
+                '<div class="dm-kpi"><div class="val" style="font-size:.85rem">'
+                + str(_login or "—") + '</div>'
+                '<div class="lbl">Last Login</div></div>',
+                unsafe_allow_html=True)
+
+            st.markdown(
+                '<div style="font-size:.75rem;color:#6b7280;margin:.5rem 0">'
+                'UID: <code>' + _uid + '</code>'
+                ' &nbsp;|&nbsp; Joined: ' + str(_join) +
+                (' &nbsp;|&nbsp; Last UTR: <code>' + _utr + '</code>' if _utr else '') +
+                (' &nbsp;|&nbsp; Paid until: ' + str(_pu)[:10] if _pu else '') +
+                '</div>', unsafe_allow_html=True)
+
+            st.markdown("**Actions:**")
+            _ac1, _ac2, _ac3, _ac4 = st.columns(4)
+
+            with _ac1:
+                if _plan != "premium":
+                    if st.button("Grant Premium", key="gp_" + _uid):
+                        _paid_until = (
+                            datetime.datetime.utcnow() +
+                            datetime.timedelta(days=30)).isoformat()
+                        _rtdb_update_user(_uid, {
+                            "plan": "premium",
+                            "paid_until": _paid_until,
+                            "proj_used": 0,
+                        })
+                        st.success("Premium granted for 30 days.")
+                        st.rerun()
+                    if _plan == "pending_review":
+                        if st.button("Reject Payment", key="rjct_" + _uid):
+                            _rtdb_update_user(_uid, {"plan": "free", "last_utr": ""})
+                            st.warning("Payment rejected. User moved to Free.")
+                            st.rerun()
+                else:
+                    if st.button("Revoke Premium", key="rp_" + _uid):
+                        _rtdb_update_user(_uid, {
+                            "plan": "free",
+                            "paid_until": None,
+                        })
+                        st.warning("Premium revoked.")
+                        st.rerun()
+
+            with _ac2:
+                _days_ext = st.number_input(
+                    "Extend (days)", min_value=1, max_value=365,
+                    value=30, key="ext_days_" + _uid, label_visibility="collapsed")
+                if st.button("Extend " + str(int(_days_ext)) + "d",
+                             key="ext_" + _uid):
+                    _base = datetime.datetime.utcnow()
+                    if _pu:
+                        try:
+                            _base = max(_base,
+                                datetime.datetime.fromisoformat(str(_pu)))
+                        except Exception:
+                            pass
+                    _new_pu = (_base + datetime.timedelta(
+                        days=int(_days_ext))).isoformat()
+                    _rtdb_update_user(_uid, {
+                        "plan": "premium",
+                        "paid_until": _new_pu,
+                    })
+                    st.success("Extended until " + _new_pu[:10])
+                    st.rerun()
+
+            with _ac3:
+                if not _admin:
+                    if st.button("Make Admin", key="ma_" + _uid):
+                        _rtdb_update_user(_uid, {"admin": True})
+                        st.success("Admin granted.")
+                        st.rerun()
+                else:
+                    if _uid != st.session_state.auth_uid:
+                        if st.button("Remove Admin", key="ra_" + _uid):
+                            _rtdb_update_user(_uid, {"admin": False})
+                            st.warning("Admin removed.")
+                            st.rerun()
+                    else:
+                        st.caption("(You)")
+
+            with _ac4:
+                if st.button("Reset Projects", key="rpr_" + _uid):
+                    _rtdb_update_user(_uid, {"proj_used": 0})
+                    st.success("Project counter reset.")
+                    st.rerun()
+
+    # ── Export all users as CSV ───────────────────────────────────────────
+    st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="dm-card-title">Export</div>',
+                unsafe_allow_html=True)
+    if _all_users:
+        import io as _admin_io
+        _rows = []
+        for _u in _all_users:
+            _rows.append({
+                "uid":        _u.get("_uid", ""),
+                "email":      _u.get("email", ""),
+                "plan":       _u.get("plan", "free"),
+                "admin":      _u.get("admin", False),
+                "proj_used":  _u.get("proj_used", 0),
+                "paid_until": _u.get("paid_until", ""),
+                "last_login": _u.get("last_login", ""),
+                "created_at": _u.get("created_at", ""),
+                "last_utr":   _u.get("last_utr", ""),
+            })
+        _df_export = pd.DataFrame(_rows)
+        st.dataframe(_df_export, use_container_width=True)
+        st.download_button(
+            "Download Users CSV",
+            data=_df_export.to_csv(index=False).encode("utf-8"),
+            file_name="datamind_users.csv",
+            mime="text/csv",
+            key="admin_export_csv",
+        )# ══════════════════════════════════════════════════════════
+#  INTRO / LANDING PAGE
+# ══════════════════════════════════════════════════════════
+if st.session_state.auth_page == "intro":
+    st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap');
+
+/* ── RESET & BASE ─────────────────────────── */
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body,[data-testid="stAppViewContainer"]{
+  background:linear-gradient(135deg,#020818 0%,#050d1e 40%,#0a0f2e 70%,#060b1c 100%)!important;
+  min-height:100vh;}
+[data-testid="stHeader"],[data-testid="stToolbar"],
+[data-testid="stDecoration"],footer{display:none!important;}
+section[data-testid="stSidebar"]{display:none!important;}
+.block-container{padding:0!important;max-width:100%!important;margin:0!important;}
+
+/* ── ANIMATED BACKGROUND ORBS ─────────────── */
+.bg-orbs{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;}
+.orb{position:absolute;border-radius:50%;filter:blur(80px);animation:float 8s ease-in-out infinite;}
+.orb1{width:600px;height:600px;background:radial-gradient(circle,rgba(59,130,246,.2),transparent 70%);
+  top:-150px;left:-100px;animation-delay:0s;}
+.orb2{width:500px;height:500px;background:radial-gradient(circle,rgba(139,92,246,.18),transparent 70%);
+  top:30%;right:-120px;animation-delay:-3s;}
+.orb3{width:400px;height:400px;background:radial-gradient(circle,rgba(6,182,212,.14),transparent 70%);
+  bottom:0;left:30%;animation-delay:-6s;}
+.orb4{width:300px;height:300px;background:radial-gradient(circle,rgba(245,158,11,.12),transparent 70%);
+  top:60%;left:10%;animation-delay:-2s;}
+@keyframes float{0%,100%{transform:translateY(0) scale(1);}
+  50%{transform:translateY(-30px) scale(1.05);}}
+
+/* ── GRID LINES OVERLAY ───────────────────── */
+.grid-lines{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
+  background-size:60px 60px;}
+
+/* ── MAIN WRAP ────────────────────────────── */
+.lp{font-family:'Inter',sans-serif;color:#fff;position:relative;z-index:1;}
+
+/* ── NAVBAR ───────────────────────────────── */
+.lp-nav{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:1rem 3rem;
+  background:rgba(5,13,30,.7);
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid rgba(255,255,255,.06);
+  position:sticky;top:0;z-index:100;}
+.lp-logo{display:flex;align-items:center;gap:.6rem;}
+.lp-logo-icon{width:36px;height:36px;border-radius:10px;
+  background:linear-gradient(135deg,#1a56db,#7c3aed);
+  display:flex;align-items:center;justify-content:center;
+  font-size:1rem;font-weight:900;box-shadow:0 0 20px rgba(26,86,219,.4);}
+.lp-logo-text{font-size:1.15rem;font-weight:800;letter-spacing:-.03em;}
+.lp-logo-text em{color:#60a5fa;font-style:normal;}
+.lp-logo-ver{font-family:'JetBrains Mono',monospace;font-size:.58rem;
+  color:#475569;letter-spacing:.1em;margin-top:1px;}
+.lp-nav-links{display:flex;align-items:center;gap:.5rem;}
+.lp-nav-pill{padding:.4rem 1rem;border-radius:8px;font-size:.78rem;font-weight:500;
+  color:#94a3b8;cursor:pointer;transition:all .15s;border:none;background:none;}
+.lp-nav-pill:hover{color:#fff;background:rgba(255,255,255,.07);}
+.lp-nav-sep{width:1px;height:18px;background:rgba(255,255,255,.1);margin:0 .25rem;}
+.lp-btn-ghost{padding:.45rem 1.1rem;border-radius:8px;font-size:.8rem;font-weight:600;
+  background:transparent;border:1px solid rgba(255,255,255,.18);color:#cbd5e1;
+  cursor:pointer;transition:all .18s;white-space:nowrap;}
+.lp-btn-ghost:hover{border-color:rgba(255,255,255,.4);background:rgba(255,255,255,.06);}
+.lp-btn-glow{padding:.45rem 1.3rem;border-radius:8px;font-size:.8rem;font-weight:700;
+  background:linear-gradient(135deg,#1a56db,#7c3aed);border:none;color:#fff;
+  cursor:pointer;box-shadow:0 0 20px rgba(26,86,219,.45);transition:all .18s;white-space:nowrap;}
+.lp-btn-glow:hover{box-shadow:0 0 32px rgba(26,86,219,.65);transform:translateY(-1px);}
+
+/* ── LIVE BADGE ───────────────────────────── */
+.live-badge{display:inline-flex;align-items:center;gap:.4rem;
+  background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);
+  border-radius:20px;padding:.28rem .85rem;font-size:.67rem;font-weight:600;
+  color:#34d399;letter-spacing:.05em;margin-bottom:1.5rem;}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#34d399;
+  animation:pulse-dot 1.5s ease infinite;}
+@keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(1.4);}}
+
+/* ── HERO ─────────────────────────────────── */
+.lp-hero{text-align:center;padding:6rem 2rem 5rem;position:relative;}
+.hero-eyebrow{display:inline-flex;align-items:center;gap:.5rem;
+  background:rgba(26,86,219,.12);border:1px solid rgba(26,86,219,.3);
+  border-radius:30px;padding:.32rem 1rem;font-size:.7rem;font-weight:600;
+  color:#93c5fd;letter-spacing:.06em;text-transform:uppercase;margin-bottom:1.8rem;}
+.hero-title{font-size:clamp(2.4rem,5vw,4.2rem);font-weight:900;line-height:1.07;
+  letter-spacing:-.05em;color:#f8fafc;max-width:860px;margin:0 auto 1.4rem;}
+.hero-title .hl{
+  background:linear-gradient(135deg,#60a5fa 0%,#a78bfa 50%,#38bdf8 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.hero-title .hl2{
+  background:linear-gradient(135deg,#f59e0b 0%,#f97316 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.hero-sub{font-size:1.05rem;color:#94a3b8;max-width:540px;
+  margin:0 auto 2.8rem;line-height:1.7;font-weight:400;}
+.hero-cta{display:flex;justify-content:center;gap:.9rem;flex-wrap:wrap;margin-bottom:4rem;}
+.cta-main{display:inline-flex;align-items:center;gap:.5rem;
+  padding:.9rem 2.2rem;border-radius:12px;font-size:.95rem;font-weight:700;
+  background:linear-gradient(135deg,#1a56db,#7c3aed);border:none;color:#fff;
+  box-shadow:0 8px 32px rgba(26,86,219,.4),0 0 0 1px rgba(255,255,255,.06);
+  transition:all .2s;cursor:pointer;}
+.cta-main:hover{box-shadow:0 12px 40px rgba(26,86,219,.55);transform:translateY(-2px);}
+.cta-sec{display:inline-flex;align-items:center;gap:.5rem;
+  padding:.9rem 2.2rem;border-radius:12px;font-size:.95rem;font-weight:600;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#e2e8f0;
+  transition:all .2s;cursor:pointer;}
+.cta-sec:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.3);}
+
+/* ── ANIMATED STATS BAR ───────────────────── */
+.stats-bar{display:flex;justify-content:center;gap:0;flex-wrap:wrap;
+  max-width:700px;margin:0 auto;
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);
+  border-radius:16px;overflow:hidden;}
+.stat-item{flex:1;min-width:120px;padding:1.4rem 1rem;text-align:center;
+  border-right:1px solid rgba(255,255,255,.07);}
+.stat-item:last-child{border-right:none;}
+.stat-num{font-family:'JetBrains Mono',monospace;font-size:1.8rem;font-weight:700;
+  background:linear-gradient(135deg,#60a5fa,#a78bfa);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.stat-lbl{font-size:.66rem;color:#64748b;text-transform:uppercase;
+  letter-spacing:.08em;margin-top:3px;}
+
+/* ── SECTION WRAPPER ──────────────────────── */
+.lp-section{padding:5rem 2rem;}
+.sec-tag{font-family:'JetBrains Mono',monospace;font-size:.65rem;font-weight:600;
+  color:#60a5fa;letter-spacing:.14em;text-transform:uppercase;
+  text-align:center;margin-bottom:.6rem;}
+.sec-h2{font-size:clamp(1.6rem,3vw,2.4rem);font-weight:800;text-align:center;
+  color:#f0f9ff;letter-spacing:-.04em;margin-bottom:.7rem;}
+.sec-sub{font-size:.9rem;color:#94a3b8;text-align:center;
+  max-width:500px;margin:0 auto 3.5rem;line-height:1.65;}
+
+/* ── FEATURE CARDS ────────────────────────── */
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  gap:1px;max-width:1080px;margin:0 auto;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.06);
+  border-radius:20px;overflow:hidden;}
+.feat-card{background:#050d1e;padding:2rem;transition:all .25s;position:relative;overflow:hidden;}
+.feat-card::before{content:"";position:absolute;inset:0;
+  background:linear-gradient(135deg,transparent,rgba(255,255,255,.02));
+  opacity:0;transition:opacity .25s;}
+.feat-card:hover{background:rgba(255,255,255,.04);}
+.feat-card:hover::before{opacity:1;}
+.feat-card:hover .feat-icon-wrap{transform:scale(1.1);}
+.feat-icon-wrap{width:48px;height:48px;border-radius:14px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.3rem;margin-bottom:1.1rem;transition:transform .25s;}
+.fib{background:linear-gradient(135deg,rgba(59,130,246,.25),rgba(59,130,246,.1));
+  border:1px solid rgba(59,130,246,.3);}
+.fip{background:linear-gradient(135deg,rgba(139,92,246,.25),rgba(139,92,246,.1));
+  border:1px solid rgba(139,92,246,.3);}
+.fig{background:linear-gradient(135deg,rgba(16,185,129,.25),rgba(16,185,129,.1));
+  border:1px solid rgba(16,185,129,.3);}
+.fio{background:linear-gradient(135deg,rgba(245,158,11,.25),rgba(245,158,11,.1));
+  border:1px solid rgba(245,158,11,.3);}
+.fic{background:linear-gradient(135deg,rgba(6,182,212,.25),rgba(6,182,212,.1));
+  border:1px solid rgba(6,182,212,.3);}
+.fir{background:linear-gradient(135deg,rgba(239,68,68,.25),rgba(239,68,68,.1));
+  border:1px solid rgba(239,68,68,.3);}
+.feat-title{font-size:.97rem;font-weight:700;color:#f1f5f9;margin-bottom:.5rem;}
+.feat-desc{font-size:.78rem;color:#64748b;line-height:1.6;}
+.feat-pills{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.9rem;}
+.feat-pill{font-size:.6rem;font-weight:600;padding:.18rem .55rem;border-radius:20px;
+  background:rgba(255,255,255,.06);color:#94a3b8;border:1px solid rgba(255,255,255,.09);}
+
+/* ── HOW IT WORKS ─────────────────────────── */
+.steps-wrap{display:flex;justify-content:center;gap:0;max-width:900px;margin:0 auto;flex-wrap:wrap;}
+.step{flex:1;min-width:180px;text-align:center;padding:2rem 1.5rem;position:relative;}
+.step::after{content:"→";position:absolute;right:-8px;top:50%;transform:translateY(-50%);
+  color:rgba(255,255,255,.15);font-size:1.4rem;}
+.step:last-child::after{display:none;}
+.step-num{width:52px;height:52px;border-radius:50%;margin:0 auto 1rem;
+  display:flex;align-items:center;justify-content:center;
+  font-family:'JetBrains Mono',monospace;font-size:1.1rem;font-weight:700;
+  background:linear-gradient(135deg,rgba(26,86,219,.3),rgba(124,58,237,.3));
+  border:1px solid rgba(96,165,250,.3);color:#60a5fa;}
+.step-title{font-size:.9rem;font-weight:700;color:#e2e8f0;margin-bottom:.4rem;}
+.step-desc{font-size:.75rem;color:#64748b;line-height:1.55;}
+
+/* ── INDUSTRY SECTION ─────────────────────── */
+.ind-bg{background:linear-gradient(180deg,transparent,rgba(26,86,219,.06),transparent);}
+.ind-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:1rem;max-width:1000px;margin:0 auto;}
+.ind-card{position:relative;border-radius:16px;padding:1.6rem 1.3rem;text-align:center;
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+  transition:all .25s;overflow:hidden;}
+.ind-card::before{content:"";position:absolute;inset:0;opacity:0;transition:opacity .25s;
+  background:linear-gradient(135deg,rgba(26,86,219,.1),rgba(139,92,246,.08));}
+.ind-card:hover{border-color:rgba(96,165,250,.25);transform:translateY(-3px);}
+.ind-card:hover::before{opacity:1;}
+.ind-emoji{font-size:2.2rem;margin-bottom:.7rem;display:block;}
+.ind-name{font-size:.9rem;font-weight:700;color:#e2e8f0;margin-bottom:.4rem;}
+.ind-use{font-size:.72rem;color:#64748b;line-height:1.55;}
+.ind-tag{display:inline-block;margin-top:.6rem;font-size:.6rem;font-weight:600;
+  padding:.15rem .55rem;border-radius:20px;background:rgba(26,86,219,.15);
+  color:#93c5fd;border:1px solid rgba(26,86,219,.25);}
+
+/* ── PRICING ──────────────────────────────── */
+.pricing-wrap{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;
+  max-width:780px;margin:0 auto;}
+.pc{border-radius:24px;padding:2.2rem 2rem;position:relative;overflow:hidden;}
+.pc-free{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.09);}
+.pc-prem{
+  background:linear-gradient(145deg,rgba(26,86,219,.2),rgba(124,58,237,.15),rgba(6,182,212,.08));
+  border:1px solid rgba(96,165,250,.3);
+  box-shadow:0 0 60px rgba(26,86,219,.12),inset 0 1px 0 rgba(255,255,255,.08);}
+.pc-prem::before{content:"";position:absolute;top:-1px;left:20%;right:20%;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(96,165,250,.6),transparent);}
+.popular-badge{position:absolute;top:1.2rem;right:1.2rem;
+  background:linear-gradient(135deg,#1a56db,#7c3aed);
+  color:#fff;font-size:.62rem;font-weight:700;
+  padding:.25rem .7rem;border-radius:20px;letter-spacing:.05em;}
+.pc-label{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  margin-bottom:1rem;display:inline-block;padding:.22rem .7rem;border-radius:20px;}
+.pc-label-free{background:rgba(255,255,255,.08);color:#94a3b8;}
+.pc-label-prem{background:rgba(96,165,250,.15);color:#93c5fd;}
+.pc-price{font-family:'JetBrains Mono',monospace;font-size:2.8rem;font-weight:700;
+  color:#f0f9ff;margin-bottom:1.5rem;line-height:1;}
+.pc-price sup{font-size:1rem;vertical-align:top;margin-top:.5rem;color:#94a3b8;}
+.pc-price sub{font-size:.8rem;font-weight:400;color:#64748b;}
+.pc-row{display:flex;align-items:flex-start;gap:.7rem;margin-bottom:.7rem;font-size:.8rem;}
+.chk-yes{color:#34d399;flex-shrink:0;font-size:.9rem;}
+.chk-no{color:#374151;flex-shrink:0;font-size:.9rem;}
+.pc-txt{line-height:1.4;}
+.pc-txt-yes{color:#cbd5e1;}
+.pc-txt-no{color:#374151;}
+.pc-divider{height:1px;background:rgba(255,255,255,.07);margin:1.2rem 0;}
+.pc-cta{width:100%;margin-top:1.8rem;padding:.8rem 1.5rem;border-radius:12px;
+  font-size:.88rem;font-weight:700;cursor:pointer;border:none;transition:all .18s;}
+.pc-cta-free{background:rgba(255,255,255,.07);color:#cbd5e1;border:1px solid rgba(255,255,255,.12);}
+.pc-cta-free:hover{background:rgba(255,255,255,.12);}
+.pc-cta-prem{background:linear-gradient(135deg,#1a56db,#7c3aed);color:#fff;
+  box-shadow:0 6px 24px rgba(26,86,219,.35);}
+.pc-cta-prem:hover{box-shadow:0 10px 32px rgba(26,86,219,.5);transform:translateY(-1px);}
+
+/* ── TESTIMONIAL / TRUST BAR ──────────────── */
+.trust-bar{display:flex;justify-content:center;align-items:center;gap:2.5rem;
+  flex-wrap:wrap;padding:2.5rem 2rem;
+  background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.05);
+  border-bottom:1px solid rgba(255,255,255,.05);}
+.trust-item{display:flex;align-items:center;gap:.5rem;font-size:.78rem;color:#64748b;}
+.trust-icon{font-size:1rem;}
+
+/* ── FOOTER ───────────────────────────────── */
+.lp-footer{text-align:center;padding:2.5rem 2rem;
+  font-size:.72rem;color:#334155;
+  border-top:1px solid rgba(255,255,255,.05);}
+.lp-footer a{color:#475569;text-decoration:none;}
+.lp-footer strong{color:#60a5fa;}
+</style>
+
+<!-- BG EFFECTS -->
+<div class="bg-orbs">
+  <div class="orb orb1"></div><div class="orb orb2"></div>
+  <div class="orb orb3"></div><div class="orb orb4"></div>
+</div>
+<div class="grid-lines"></div>
+
+<div class="lp">
+
+<!-- ═══ NAVBAR ══════════════════════════════════════════ -->
+<nav class="lp-nav">
+  <div class="lp-logo">
+    <div class="lp-logo-icon">&#9672;</div>
+    <div>
+      <div class="lp-logo-text">DataMind <em>AI</em></div>
+      <div class="lp-logo-ver">v5.0 · PRODUCTION</div>
+    </div>
+  </div>
+  <div class="lp-nav-links">
+    <span class="lp-nav-pill">Features</span>
+    <span class="lp-nav-pill">Industries</span>
+    <span class="lp-nav-pill">Pricing</span>
+    <div class="lp-nav-sep"></div>
+    <span class="lp-btn-ghost" id="nav-signin">Sign In</span>
+    <span class="lp-btn-glow" id="nav-signup">Get Started Free</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═════════════════════════════════════════════ -->
+<section class="lp-hero">
+  <div class="live-badge">
+    <span class="live-dot"></span>
+    Live · No-Code AI Platform
+  </div>
+  <h1 class="hero-title">
+    Build Production AI<br>
+    <span class="hl">Without Writing</span>
+    <span class="hl2"> Code</span>
+  </h1>
+  <p class="hero-sub">
+    Upload your CSV, click train, get results. DataMind AI puts AutoML, Deep Learning,
+    RAG, NLP, and Chatbot in one powerful platform — ready in minutes.
+  </p>
+  <div class="hero-cta">
+    <span class="cta-main" id="hero-start">
+      &#128640;&nbsp; Get Started Free
+    </span>
+    <span class="cta-sec" id="hero-login">
+      &#128274;&nbsp; Sign In
+    </span>
+  </div>
+
+  <!-- STATS BAR -->
+  <div class="stats-bar">
+    <div class="stat-item">
+      <div class="stat-num" id="c1">0</div>
+      <div class="stat-lbl">AI Modules</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num" id="c2">0</div>
+      <div class="stat-lbl">ML Algorithms</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">FAISS</div>
+      <div class="stat-lbl">Vector Search</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">Free</div>
+      <div class="stat-lbl">To Start</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ TRUST BAR ════════════════════════════════════════ -->
+<div class="trust-bar">
+  <div class="trust-item"><span class="trust-icon">&#128274;</span> Firebase Authentication</div>
+  <div class="trust-item"><span class="trust-icon">&#9889;</span> FAISS · Facebook AI</div>
+  <div class="trust-item"><span class="trust-icon">&#129504;</span> TensorFlow · Keras</div>
+  <div class="trust-item"><span class="trust-icon">&#128202;</span> SHAP Explainability</div>
+  <div class="trust-item"><span class="trust-icon">&#127381;</span> Razorpay Payments</div>
+</div>
+
+<!-- ═══ HOW IT WORKS ══════════════════════════════════════ -->
+<section class="lp-section">
+  <div class="sec-tag">&#9881; How it works</div>
+  <div class="sec-h2">From Data to AI in 3 Steps</div>
+  <div class="sec-sub">No setup. No infra. No code. Just results.</div>
+  <div class="steps-wrap">
+    <div class="step">
+      <div class="step-num">01</div>
+      <div class="step-title">Upload Your Data</div>
+      <div class="step-desc">Drop any CSV file. DataMind auto-detects columns, types, missing values, and suggests the right task.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">02</div>
+      <div class="step-title">Configure & Train</div>
+      <div class="step-desc">Pick a model or let Auto-Compare test all 15+ algorithms. Tune hyperparameters or use smart defaults.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">03</div>
+      <div class="step-title">Evaluate & Export</div>
+      <div class="step-desc">Get accuracy, F1, AUC, SHAP plots and learning curves. Download your trained model as a .pkl file.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FEATURES ══════════════════════════════════════════ -->
+<section class="lp-section" style="padding-top:1rem;">
+  <div class="sec-tag">&#127775; Core Features</div>
+  <div class="sec-h2">Everything You Need to Build AI</div>
+  <div class="sec-sub">One platform. Ten AI modules. Zero code required.</div>
+  <div class="feat-grid">
+    <div class="feat-card">
+      <div class="feat-icon-wrap fib">&#129302;</div>
+      <div class="feat-title">AutoML Engine</div>
+      <div class="feat-desc">Auto-compare 15+ algorithms, tune hyperparameters, detect data leakage, and download your model — all in one click.</div>
+      <div class="feat-pills"><span class="feat-pill">Random Forest</span><span class="feat-pill">XGBoost</span><span class="feat-pill">SVM</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap fip">&#129504;</div>
+      <div class="feat-title">Deep Learning</div>
+      <div class="feat-desc">Build CNN image classifiers and LSTM sequence models with a visual layer builder. TensorFlow + Keras under the hood.</div>
+      <div class="feat-pills"><span class="feat-pill">CNN</span><span class="feat-pill">LSTM</span><span class="feat-pill">TensorFlow</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap fig">&#128270;</div>
+      <div class="feat-title">RAG + FAISS</div>
+      <div class="feat-desc">Upload PDFs and docs, then ask natural language questions. Powered by Facebook AI's FAISS vector search for precise semantic retrieval.</div>
+      <div class="feat-pills"><span class="feat-pill">FAISS</span><span class="feat-pill">Embeddings</span><span class="feat-pill">Semantic</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap fio">&#128172;</div>
+      <div class="feat-title">Chatbot Studio</div>
+      <div class="feat-desc">Upload any Q&amp;A CSV and train a custom chatbot. Live chat UI, intent detection, confidence scoring — no code needed.</div>
+      <div class="feat-pills"><span class="feat-pill">Intent NLP</span><span class="feat-pill">Cosine Match</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap fic">&#128202;</div>
+      <div class="feat-title">NLP &amp; Text</div>
+      <div class="feat-desc">Sentiment analysis, spam detection, topic classification. TF-IDF vectorization with Naive Bayes, SVM, and Logistic Regression.</div>
+      <div class="feat-pills"><span class="feat-pill">Sentiment</span><span class="feat-pill">Spam</span><span class="feat-pill">Topics</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap fir">&#128200;</div>
+      <div class="feat-title">SHAP Explainability</div>
+      <div class="feat-desc">Understand every prediction with SHAP bar plots, beeswarm charts, and feature importance rankings. Full model transparency.</div>
+      <div class="feat-pills"><span class="feat-pill">XAI</span><span class="feat-pill">Feature Impact</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ INDUSTRIES ════════════════════════════════════════ -->
+<section class="lp-section ind-bg">
+  <div class="sec-tag">&#127968; Industries</div>
+  <div class="sec-h2">Built for Every Industry</div>
+  <div class="sec-sub">Real AI decisions across healthcare, finance, retail, and more.</div>
+  <div class="ind-grid">
+    <div class="ind-card">
+      <span class="ind-emoji">&#127973;</span>
+      <div class="ind-name">Healthcare</div>
+      <div class="ind-use">Disease prediction · Risk scoring · Medical report Q&amp;A</div>
+      <div class="ind-tag">Clinical AI</div>
+    </div>
+    <div class="ind-card">
+      <span class="ind-emoji">&#128178;</span>
+      <div class="ind-name">Finance</div>
+      <div class="ind-use">Fraud detection · Credit scoring · Loan default</div>
+      <div class="ind-tag">FinTech AI</div>
+    </div>
+    <div class="ind-card">
+      <span class="ind-emoji">&#128722;</span>
+      <div class="ind-name">Retail</div>
+      <div class="ind-use">Churn prediction · Recommendations · Forecasting</div>
+      <div class="ind-tag">eCommerce AI</div>
+    </div>
+    <div class="ind-card">
+      <span class="ind-emoji">&#127979;</span>
+      <div class="ind-name">Education</div>
+      <div class="ind-use">Performance prediction · FAQ chatbot · Doc search</div>
+      <div class="ind-tag">EdTech AI</div>
+    </div>
+    <div class="ind-card">
+      <span class="ind-emoji">&#9881;</span>
+      <div class="ind-name">Manufacturing</div>
+      <div class="ind-use">Predictive maintenance · Defect detection · Anomaly</div>
+      <div class="ind-tag">Industry 4.0</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ PRICING ═══════════════════════════════════════════ -->
+<section class="lp-section">
+  <div class="sec-tag">&#128176; Pricing</div>
+  <div class="sec-h2">Start Free. Scale When Ready.</div>
+  <div class="sec-sub">No credit card needed to start. Upgrade for unlimited AI power.</div>
+  <div class="pricing-wrap">
+    <!-- FREE -->
+    <div class="pc pc-free">
+      <div class="pc-label pc-label-free">Free Forever</div>
+      <div class="pc-price"><sup>&#8377;</sup>0<sub> / month</sub></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">2 AI projects</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">AutoML — all 15+ algorithms</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Deep EDA &amp; Analysis</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">SHAP explainability</span></div>
+      <div class="pc-divider"></div>
+      <div class="pc-row"><span class="chk-no">&#10007;</span><span class="pc-txt pc-txt-no">Deep Learning (CNN/LSTM)</span></div>
+      <div class="pc-row"><span class="chk-no">&#10007;</span><span class="pc-txt pc-txt-no">RAG + FAISS search</span></div>
+      <div class="pc-row"><span class="chk-no">&#10007;</span><span class="pc-txt pc-txt-no">Chatbot Studio</span></div>
+      <div class="pc-row"><span class="chk-no">&#10007;</span><span class="pc-txt pc-txt-no">NLP Classification</span></div>
+    </div>
+    <!-- PREMIUM -->
+    <div class="pc pc-prem">
+      <div class="popular-badge">&#11088; Most Popular</div>
+      <div class="pc-label pc-label-prem">Premium</div>
+      <div class="pc-price"><sup>&#8377;</sup>1000<sub> / month</sub></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Unlimited projects</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Everything in Free</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Deep Learning (CNN + LSTM)</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">RAG with FAISS semantic search</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Chatbot Studio</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">NLP Text Classification</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Clustering &amp; Auto Labeling</span></div>
+      <div class="pc-row"><span class="chk-yes">&#10003;</span><span class="pc-txt pc-txt-yes">Priority support</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FOOTER ════════════════════════════════════════════ -->
+<footer class="lp-footer">
+  <strong>&#9672; DataMind AI</strong> v5.0 &nbsp;&middot;&nbsp;
+  Production AutoML Platform &nbsp;&middot;&nbsp;
+  Built with &#10084; for data scientists &nbsp;&middot;&nbsp;
+  &copy; 2025 DataMind AI
+</footer>
+
+</div>
+
+<script>
+// Animate counters
+function animateCounter(id, target, suffix) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var start = 0, duration = 1200;
+  var step = target / (duration / 16);
+  var timer = setInterval(function() {
+    start = Math.min(start + step, target);
+    el.textContent = Math.floor(start) + (suffix || "");
+    if (start >= target) clearInterval(timer);
+  }, 16);
+}
+window.addEventListener("load", function() {
+  animateCounter("c1", 10, "+");
+  animateCounter("c2", 15, "+");
+});
+</script>
+""", unsafe_allow_html=True)
+
+    # Streamlit nav buttons
+    _ib1, _ib2, _ib3 = st.columns([1, 1, 1])
+    with _ib1:
+        if st.button("🚀 Get Started Free", key="intro_signup", use_container_width=True):
+            st.session_state.auth_page = "signup"; st.rerun()
+    with _ib2:
+        if st.button("🔐 Sign In", key="intro_login", use_container_width=True):
+            st.session_state.auth_page = "login"; st.rerun()
+    with _ib3:
+        if st.button("💎 View Pricing", key="intro_pricing", use_container_width=True):
+            st.session_state.auth_page = "signup"; st.rerun()
+    st.stop()
+
+if st.session_state.auth_page == "login":
+    st.markdown(_A, unsafe_allow_html=True)
+    _c1, _c2 = st.columns([1.1, 1])
+    with _c1:
+        st.markdown(_left_base("Sign in to continue"), unsafe_allow_html=True)
+    with _c2:
+        _right_open()
+        st.markdown(
+            '<div class="ac-title">Welcome back</div>'
+            '<div class="ac-sub">Sign in to your DataMind AI account</div>',
+            unsafe_allow_html=True)
+        if st.session_state.auth_error:
+            st.markdown(
+                '<div class="ac-err">&#9888;&nbsp;'+str(st.session_state.auth_error)+'</div>',
+                unsafe_allow_html=True)
+        _em = st.text_input("Email address", key="li_em", placeholder="you@example.com")
+        _pw = st.text_input("Password", type="password", key="li_pw", placeholder="Your password")
+        st.markdown('<div class="ap">', unsafe_allow_html=True)
+        if st.button("Sign In", key="li_btn", use_container_width=True):
+            _do_login(_em, _pw); st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="aor">or</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="text-align:center;font-size:.78rem;color:#64748b;margin-bottom:.3rem">'
+            'New here? Create a free account</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ag">', unsafe_allow_html=True)
+        if st.button("Create Account", key="li_signup", use_container_width=True):
+            st.session_state.auth_page="signup"; st.session_state.auth_error=""; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ac-foot">Free plan &middot; 2 projects &middot; No credit card needed</div>', unsafe_allow_html=True)
+        _right_close()
+    st.stop()
+
+elif st.session_state.auth_page == "signup":
+    st.markdown(_A, unsafe_allow_html=True)
+    _c1, _c2 = st.columns([1.1, 1])
+    with _c1:
+        st.markdown(_left_base("Create your account"), unsafe_allow_html=True)
+    with _c2:
+        _right_open()
+        st.markdown(
+            '<div class="ac-title">Get started free</div>'
+            '<div class="ac-sub">No credit card &middot; Cancel anytime</div>',
+            unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ac-chip">&#10024; Free plan includes 2 projects</div>',
+            unsafe_allow_html=True)
+        if st.session_state.auth_error:
+            st.markdown(
+                '<div class="ac-err">&#9888;&nbsp;'+str(st.session_state.auth_error)+'</div>',
+                unsafe_allow_html=True)
+        _em2 = st.text_input("Email address",   key="su_em",  placeholder="you@example.com")
+        _pw2 = st.text_input("Password",         type="password", key="su_pw", placeholder="Min 6 characters")
+        _pw3 = st.text_input("Confirm password", type="password", key="su_pw2",placeholder="Repeat password")
+        st.markdown('<div class="ap">', unsafe_allow_html=True)
+        if st.button("Create Account", key="su_btn", use_container_width=True):
+            _do_signup(_em2, _pw2, _pw3); st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="aor">already have an account?</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ag">', unsafe_allow_html=True)
+        if st.button("Sign in instead", key="su_login", use_container_width=True):
+            st.session_state.auth_page="login"; st.session_state.auth_error=""; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ac-foot">By signing up you agree to our Terms of Service</div>',
+            unsafe_allow_html=True)
+        _right_close()
+    st.stop()
+
+elif st.session_state.auth_page == "payment":
+    st.markdown(_A, unsafe_allow_html=True)
+    _uid_pay = st.session_state.auth_uid
+
+    # Check if Razorpay just redirected back with a payment result
+    if _check_razorpay_callback():
+        st.success("Payment verified! Premium activated for 30 days.")
+        import time as _tz; _tz.sleep(1.5)
+        st.session_state.pop("rzp_order", None)
+        st.session_state.auth_page = "app"; st.rerun()
+
+    _pricebox = (
+        '<div class="al-pricebox">'
+        '<div><span class="amount">&#8377;300</span>'
+        '<span class="per">/ month</span></div>'
+        '<div class="sub">30 days full access &middot; Renew anytime</div>'
+        '</div>'
+    )
+    _c1, _c2 = st.columns([1.1, 1])
+    with _c1:
+        st.markdown(_left_base("Upgrade to Premium", extra_html=_pricebox),
+                    unsafe_allow_html=True)
+    with _c2:
+        _right_open()
+        st.markdown(
+            '<div class="ac-title">Choose Payment Method</div>'
+            '<div class="ac-sub">Instant via Razorpay &middot; or manual UPI transfer</div>',
+            unsafe_allow_html=True)
+
+        _ptab_rzp, _ptab_upi = st.tabs(["💳 Razorpay (Instant)", "🏦 UPI / Manual"])
+
+        with _ptab_rzp:
+            st.markdown(
+                '<div style="background:#f0f7ff;border:1px solid #bdd3fc;border-radius:10px;'
+                'padding:.7rem 1rem;font-size:.8rem;color:#1e40af;margin-bottom:.8rem">'
+                '&#9889; Payment is verified automatically — '
+                'Premium activates <strong>instantly</strong> after checkout.</div>',
+                unsafe_allow_html=True)
+
+            # ── Direct Razorpay Payment Link ──────────────────────────────────
+            st.markdown(
+                '<div style="text-align:center;margin:1rem 0;">'
+                '<a href="' + RAZORPAY_PAYMENT_LINK + '" '
+                'target="_blank" rel="noopener noreferrer" '
+                'style="display:inline-block;background:#2563eb;color:#fff;'
+                'font-family:IBM Plex Sans,sans-serif;font-weight:600;font-size:0.92rem;'
+                'padding:0.65rem 2rem;border-radius:8px;text-decoration:none;'
+                'box-shadow:0 2px 8px rgba(37,99,235,.25);letter-spacing:0.01em;">'
+                '&#128179; Pay &#8377;' + str(PLAN_PRICE) + ' via Razorpay'
+                '</a>'
+                '<div style="margin-top:.5rem;font-size:.72rem;color:#64748b;">'
+                'Secure &middot; UPI / Cards / Net Banking accepted'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True)
+
+            st.markdown(
+                '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
+                'padding:.55rem .85rem;font-size:.75rem;color:#92400e;margin:.6rem 0 .4rem;">'
+                '&#9888; After paying, copy your <strong>Transaction / Payment ID</strong> and '
+                'submit it in the <strong>UPI / Manual</strong> tab — Premium activates instantly!'
+                '</div>',
+                unsafe_allow_html=True)
+
+            if "rzp_order" not in st.session_state:
+                try:
+                    st.session_state.rzp_order = _razorpay_create_order(PLAN_PRICE)
+                except Exception as _e:
+                    st.session_state.rzp_order = None
+            _rzp_o = st.session_state.get("rzp_order")
+            if _rzp_o and _rzp_o.get("id"):
+                _render_razorpay_button(
+                    order_id=_rzp_o["id"],
+                    amount_inr=PLAN_PRICE,
+                    user_email=st.session_state.auth_email,
+                )
+
+        with _ptab_upi:
+            _qri = _generate_upi_qr()
+            if _qri:
+                import io as _bio; _buf = _bio.BytesIO(); _qri.save(_buf, format="PNG")
+                _q1, _q2, _q3 = st.columns([1, 2, 1])
+                with _q2:
+                    st.image(_buf.getvalue(), use_container_width=True)
+            st.markdown(
+                '<div style="background:#eef4ff;border:1px solid #bdd3fc;border-radius:12px;'
+                'padding:.8rem 1rem;margin:.6rem 0;display:flex;justify-content:space-between;'
+                'align-items:center;">'
+                '<div>'
+                '<div style="font-size:.62rem;color:#64748b;text-transform:uppercase;'
+                'letter-spacing:.07em;margin-bottom:.12rem;">UPI ID</div>'
+                '<div style="font-family:IBM Plex Mono,monospace;font-size:.87rem;'
+                'font-weight:700;color:#1a56db;">' + str(UPI_ID) + '</div>'
+                '</div>'
+                '<div style="text-align:right;">'
+                '<div style="font-size:.62rem;color:#64748b;text-transform:uppercase;'
+                'letter-spacing:.07em;margin-bottom:.12rem;">Amount</div>'
+                '<div style="font-size:1.1rem;font-weight:700;color:#0a1428;">'
+                '&#8377;' + str(PLAN_PRICE) + '</div>'
+                '</div></div>',
+                unsafe_allow_html=True)
+            st.markdown(
+                '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
+                'padding:.55rem .85rem;font-size:.75rem;color:#92400e;margin-bottom:.7rem;">'
+                '&#9888; After paying, paste your 12-digit <strong>UTR / Transaction ID</strong>'
+                ' from your UPI app below. Premium activates <strong>instantly</strong> after submission.</div>',
+                unsafe_allow_html=True)
+            _utr = st.text_input("UTR / Transaction ID", placeholder="e.g. 426781234567",
+                                  key="pay_utr")
+            st.markdown('<div class="ap">', unsafe_allow_html=True)
+            if st.button("Submit for Verification", key="pay_act", use_container_width=True):
+                _ok, _msg = _submit_payment(_uid_pay, _utr)
+                if _ok:
+                    st.success(_msg)
+                    import time as _t; _t.sleep(1.5)
+                    st.session_state.auth_page = "app"; st.rerun()
+                else:
+                    st.error(_msg)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="ag">', unsafe_allow_html=True)
+        if st.button("Back to App", key="pay_back", use_container_width=True):
+            st.session_state.pop("rzp_order", None)
+            st.session_state.auth_page = "app"; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        _right_close()
+    st.stop()
+#  SIDEBAR  (only shown when logged in)
+# ══════════════════════════════════════════════════════════
+with st.sidebar:
+    st.markdown("""
+    <div class="dm-logo">
+      <div class="name">◈ DataMind AI</div>
+      <div class="ver"><span class="dot"></span>Production · v5.0</div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── User info panel ──────────────────────────────────
+    _is_pending  = st.session_state.auth_plan == "pending_review"
+    _plan_color  = ("#047857" if st.session_state.auth_plan == "premium"
+                    else "#d97706" if _is_pending else "#b45309")
+    _plan_label  = ("Premium" if st.session_state.auth_plan == "premium"
+                    else "⏳ Pending" if _is_pending else "Free")
+    _proj_left   = ("∞" if st.session_state.auth_plan == "premium"
+                    else "—" if _is_pending
+                    else str(max(0, PLAN_FREE_PROJ - st.session_state.auth_proj_used)))
+    st.markdown(f"""
+    <div style="background:#0f2a4a;border-radius:8px;padding:0.75rem 1rem;margin-bottom:0.75rem">
+      <div style="font-size:0.72rem;color:#94a3b8;margin-bottom:2px">Logged in as</div>
+      <div style="font-size:0.82rem;color:#f1f5f9;font-weight:600;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        {st.session_state.auth_email or "Guest"}</div>
+      <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
+        <span style="background:{_plan_color};color:#fff;border-radius:20px;
+          padding:1px 8px;font-size:0.65rem;font-weight:700">{_plan_label}</span>
+        <span style="font-size:0.65rem;color:#94a3b8">Projects left: {_proj_left}</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    if _is_pending:
+        st.markdown(
+            '<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;'
+            'padding:.5rem .75rem;font-size:.72rem;color:#92400e;margin-bottom:.5rem">'
+            '⏳ Payment under review. You will be upgraded shortly.</div>',
+            unsafe_allow_html=True)
+    elif st.session_state.auth_plan == "free":
+        if st.button("⬆️ Upgrade ₹1000/mo", use_container_width=True, key="sb_upgrade"):
+            st.session_state.auth_page = "payment"
+            st.rerun()
+
+    if st.session_state.auth_plan == "premium" and st.session_state.auth_paid_until:
+        _days = (st.session_state.auth_paid_until - datetime.datetime.utcnow()).days
+        st.caption(f"Premium expires in **{max(0,_days)}** days")
+
+    st.markdown("---")
+
+    _nav_pages = [
+        "📊 Analysis","🤖 AutoML","📈 Evaluation",
+        "🔬 Rag","🔮 Inference","🔵 Clustering",
+        "🧠 Deep Learning","💬 NLP / Text","🤖 Chatbot","🤖 Auto Labeling",
+        "💳 Pricing",
+    ]
+    if st.session_state.auth_is_admin:
+        _nav_pages.append("🛡️ Admin Panel")
+    page = st.radio("Navigate", _nav_pages, label_visibility="collapsed")
+
+    st.markdown("---")
+    st.markdown("<div style='font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.5rem'>Training config</div>",unsafe_allow_html=True)
+    test_size   = st.slider("Test split %",10,40,20)/100
+    cv_folds    = st.slider("CV folds",3,10,5)
+    random_seed = st.number_input("Random seed",value=42,step=1)
+
+    st.markdown("---")
+    st.markdown(f"""
+    <div style='font-family:IBM Plex Mono,monospace;font-size:0.65rem;color:#64748b;line-height:2'>
+    {'✓ Model loaded' if st.session_state.model else '— No model'}<br>
+    Experiments: {len(st.session_state.history)}
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+    _sb1, _sb2 = st.columns(2)
+    with _sb1:
+        if st.button("🗑 Clear", use_container_width=True):
+            for k in ["model","features","train_df","problem","label_encoders",
+                      "y_test","preds","proba","col_meta","shap_values","shap_X","history",
+                      "dl_model","dl_history","dl_type","dl_tokenizer","dl_classes","dl_img_size",
+                      "nlp_model","nlp_vectorizer","nlp_classes",
+                      "chatbot_model","chatbot_vectorizer","chatbot_responses",
+                      "chatbot_classes","chat_history"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+    with _sb2:
+        if st.button("🚪 Logout", use_container_width=True):
+            _do_logout()
+            st.rerun()
+
+# ══════════════════════════════════════════════════════════
+#  PAGE: ANALYSIS
+# ══════════════════════════════════════════════════════════
+if page=="📊 Analysis":
+    from scipy import stats as _sp_stats
+    import warnings as _warn
+
+    st.markdown("""<div class="dm-pagehead"><div class="icon">📊</div>
+    <div><div class="title">Data Analysis</div>
+    <div class="sub">EDA · Distributions · Correlations · Outliers · Statistical Tests · Time Series · Report</div></div></div>""",
+    unsafe_allow_html=True)
+
+    uploaded = st.file_uploader("Upload CSV dataset", type=["csv"])
+    if not uploaded:
+        st.markdown('<div class="dm-upload"><div class="uicon">📊</div>' \
+                    '<div class="hint">Drop a CSV file to begin deep analysis</div></div>',
+                    unsafe_allow_html=True)
+        st.stop()
+
+    fb = uploaded.read()
+    df_raw = load_csv(fb)
+
+    num_cols = df_raw.select_dtypes(include=np.number).columns.tolist()
+    cat_cols = df_raw.select_dtypes(include=["object","category"]).columns.tolist()
+    miss_total = int(df_raw.isnull().sum().sum())
+    dup_total  = int(df_raw.duplicated().sum())
+
+    # ── KPI banner ──────────────────────────────────────
+    k1,k2,k3,k4,k5,k6 = st.columns(6)
+    for _col,_val,_lbl,_cls in [
+        (k1, f"{df_raw.shape[0]:,}", "Rows", ""),
+        (k2, str(df_raw.shape[1]), "Columns", "gold"),
+        (k3, str(len(num_cols)), "Numeric", "blue"),
+        (k4, str(len(cat_cols)), "Categorical", ""),
+        (k5, str(miss_total), "Missing", "red" if miss_total>0 else "green"),
+        (k6, str(dup_total),  "Duplicates", "red" if dup_total>0 else "green"),
+    ]:
+        _col.markdown(f'<div class="dm-kpi {_cls}"><div class="val" style="font-size:1.3rem">{_val}</div>' \
+                      f'<div class="lbl">{_lbl}</div></div>', unsafe_allow_html=True)
+
+    # ── TABS ────────────────────────────────────────────
+    (t_ov, t_dist, t_cat, t_corr, t_out,
+     t_miss, t_test, t_ts, t_pair, t_rep) = st.tabs([
+        "🗂 Overview", "📈 Distributions", "🏷 Categorical",
+        "🔗 Correlation", "🚨 Outliers", "❓ Missing Data",
+        "🧪 Statistical Tests", "📅 Time Series",
+        "🔵 Pairplot", "📄 Report"
+    ])
+
+    # ════════════════════════════════════════════════════
+    #  TAB 1 — OVERVIEW
+    # ════════════════════════════════════════════════════
+    with t_ov:
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Data Preview</div>', unsafe_allow_html=True)
+        n_rows = st.slider("Rows to display", 5, 100, 20, key="ov_rows")
+        st.dataframe(df_raw.head(n_rows), use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Column Info</div>', unsafe_allow_html=True)
+        _info_df = pd.DataFrame({
+            "Column":    df_raw.columns,
+            "DType":     df_raw.dtypes.astype(str).values,
+            "Non-Null":  df_raw.notnull().sum().values,
+            "Null":      df_raw.isnull().sum().values,
+            "Null %":    (df_raw.isnull().mean()*100).round(2).values,
+            "Unique":    df_raw.nunique().values,
+            "Sample":    [str(df_raw[c].dropna().iloc[0]) if df_raw[c].notnull().any() else "" for c in df_raw.columns],
+        })
+        st.dataframe(_info_df, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="dm-card"><div class="dm-card-title">Summary Statistics</div>', unsafe_allow_html=True)
+        _desc = df_raw.describe(include="all").T.reset_index().rename(columns={"index":"Column"})
+        st.dataframe(_desc.style.background_gradient(cmap="Blues", subset=[c for c in _desc.columns if c not in ["Column","top","freq"]]),
+                     use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if dup_total > 0:
+            st.warning(f"⚠️ {dup_total} duplicate rows found.")
+            if st.button("👁 Show duplicates", key="show_dups"):
+                st.dataframe(df_raw[df_raw.duplicated(keep=False)].head(50), use_container_width=True)
+
+        # Memory usage
+        _mem = df_raw.memory_usage(deep=True).sum() / 1024**2
+        st.markdown(f'<span class="dm-badge blue">💾 Memory usage: {_mem:.2f} MB</span>',
+                    unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 2 — DISTRIBUTIONS
+    # ════════════════════════════════════════════════════
+    with t_dist:
+        if not num_cols:
+            st.info("No numeric columns found.")
+        else:
+            _d1, _d2, _d3 = st.columns(3)
+            with _d1: col_sel = st.selectbox("Column", num_cols, key="dist_col")
+            with _d2: dist_bins = st.slider("Bins", 5, 100, 30, key="dist_bins")
+            with _d3: show_kde  = st.checkbox("Show KDE", value=True, key="dist_kde")
+
+            _series = df_raw[col_sel].dropna()
+
+            # Stats panel
+            _sk = float(_series.skew())
+            _ku = float(_series.kurtosis())
+            _s1,_s2,_s3,_s4,_s5,_s6 = st.columns(6)
+            for _sc,_sv,_sl in [
+                (_s1,f"{_series.mean():.4f}","Mean"),
+                (_s2,f"{_series.median():.4f}","Median"),
+                (_s3,f"{_series.std():.4f}","Std Dev"),
+                (_s4,f"{_sk:.3f}","Skewness"),
+                (_s5,f"{_ku:.3f}","Kurtosis"),
+                (_s6,f"{_series.quantile(.25):.3f} / {_series.quantile(.75):.3f}","Q1 / Q3"),
+            ]:
+                _sc.markdown(f'<div class="dm-kpi"><div class="val" style="font-size:1rem">{_sv}</div>' \
+                             f'<div class="lbl">{_sl}</div></div>', unsafe_allow_html=True)
+
+            if abs(_sk) > 1:
+                st.warning(f"⚠️ Column **{col_sel}** is {'right' if _sk>0 else 'left'}-skewed (skewness={_sk:.2f}). Consider log-transform.")
+
+            fig_d, axes_d = plt.subplots(1, 3, figsize=(14, 3.8))
+
+            # Histogram + KDE
+            axes_d[0].hist(_series, bins=dist_bins, color=C_BLUE, edgecolor="white", alpha=0.82, density=show_kde)
+            if show_kde:
+                from scipy.stats import gaussian_kde as _gkde
+                _kd = _gkde(_series)
+                _xs = np.linspace(_series.min(), _series.max(), 200)
+                axes_d[0].plot(_xs, _kd(_xs), color=C_RED, linewidth=2, label="KDE")
+                axes_d[0].legend(fontsize=8)
+            axes_d[0].set_title(f"{col_sel} — Histogram")
+
+            # Boxplot
+            axes_d[1].boxplot(_series, patch_artist=True,
+                              boxprops=dict(facecolor="#dbeafe", color=C_BLUE),
+                              whiskerprops=dict(color=C_SLATE), capprops=dict(color=C_SLATE),
+                              medianprops=dict(color=C_GOLD, linewidth=2),
+                              flierprops=dict(marker="o", markerfacecolor=C_RED, markersize=4, alpha=0.5))
+            axes_d[1].set_title(f"{col_sel} — Boxplot")
+
+            # Q-Q Plot
+            (_osm, _osr), (_slope, _intercept, _r) = _sp_stats.probplot(_series, dist="norm")
+            axes_d[2].plot(_osm, _osr, "o", color=C_BLUE, markersize=3, alpha=0.6)
+            axes_d[2].plot(_osm, np.array(_osm)*_slope+_intercept, color=C_RED, linewidth=2)
+            axes_d[2].set_title(f"{col_sel} — Q-Q Plot (Normal)")
+            axes_d[2].set_xlabel("Theoretical Quantiles"); axes_d[2].set_ylabel("Sample Quantiles")
+
+            fig_d.tight_layout(); st.pyplot(fig_d); plt.close(fig_d)
+
+            # Multi-column distribution grid
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**All numeric columns — distribution grid:**")
+            _grid_cols = num_cols[:16]
+            _gc = 4
+            _gr = (len(_grid_cols)-1)//_gc + 1
+            fig_grid, axes_grid = plt.subplots(_gr, _gc, figsize=(14, _gr*2.8))
+            axes_grid = np.array(axes_grid).flatten()
+            for _gi, _gcol in enumerate(_grid_cols):
+                _s = df_raw[_gcol].dropna()
+                axes_grid[_gi].hist(_s, bins=25, color=C_BLUE, edgecolor="white", alpha=0.8)
+                axes_grid[_gi].set_title(_gcol, fontsize=8, fontweight="600")
+                axes_grid[_gi].tick_params(labelsize=6)
+            for _gi in range(len(_grid_cols), len(axes_grid)):
+                axes_grid[_gi].set_visible(False)
+            fig_grid.tight_layout(); st.pyplot(fig_grid); plt.close(fig_grid)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 3 — CATEGORICAL
+    # ════════════════════════════════════════════════════
+    with t_cat:
+        if not cat_cols:
+            st.info("No categorical columns found.")
+        else:
+            _cat_sel = st.selectbox("Categorical column", cat_cols, key="cat_col")
+            _vc = df_raw[_cat_sel].value_counts().head(30)
+            _ca1, _ca2 = st.columns([1,1])
+
+            with _ca1:
+                # Bar chart
+                fig_ca, ax_ca = plt.subplots(figsize=(6, max(3, len(_vc)*0.38)))
+                _colors_ca = [C_BLUE if i==0 else "#93c5fd" for i in range(len(_vc))]
+                bars_ca = ax_ca.barh(_vc.index[::-1], _vc.values[::-1], color=_colors_ca[::-1], edgecolor="white")
+                ax_ca.bar_label(bars_ca, padding=3, fontsize=8)
+                ax_ca.set_title(f"{_cat_sel} — Value Counts (top 30)")
+                fig_ca.tight_layout(); st.pyplot(fig_ca); plt.close(fig_ca)
+
+            with _ca2:
+                # Pie chart
+                _pie_data = _vc.head(8)
+                fig_pi, ax_pi = plt.subplots(figsize=(5, 5))
+                _wedge_colors = [C_BLUE, C_GOLD, C_GREEN, C_RED, C_PURPLE, C_SLATE, "#06b6d4", "#f97316"]
+                ax_pi.pie(_pie_data.values, labels=_pie_data.index,
+                          colors=_wedge_colors[:len(_pie_data)],
+                          autopct="%1.1f%%", startangle=90,
+                          wedgeprops=dict(edgecolor="white", linewidth=1.5),
+                          textprops=dict(fontsize=8))
+                ax_pi.set_title(f"{_cat_sel} — Distribution (top 8)")
+                fig_pi.tight_layout(); st.pyplot(fig_pi); plt.close(fig_pi)
+
+            st.dataframe(_vc.reset_index().rename(columns={"index":_cat_sel,"count":"Count",_cat_sel:"Value"}),
+                         use_container_width=True)
+
+            # Cross-tab with another column
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Cross-tabulation:**")
+            _other_cats = [c for c in cat_cols if c != _cat_sel]
+            if _other_cats:
+                _cross_col = st.selectbox("Cross with", _other_cats, key="cross_col")
+                _ct = pd.crosstab(df_raw[_cat_sel], df_raw[_cross_col])
+                st.dataframe(_ct, use_container_width=True)
+                fig_ct, ax_ct = plt.subplots(figsize=(max(6, _ct.shape[1]*1.2), max(3, _ct.shape[0]*0.5)))
+                _ct.plot(kind="bar", ax=ax_ct, edgecolor="white", alpha=0.85)
+                ax_ct.set_title(f"{_cat_sel} × {_cross_col}")
+                plt.xticks(rotation=30, ha="right"); ax_ct.legend(fontsize=8)
+                fig_ct.tight_layout(); st.pyplot(fig_ct); plt.close(fig_ct)
+
+            # Numeric breakdown by category
+            if num_cols:
+                st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+                st.markdown("**Numeric column breakdown by category:**")
+                _num_by_cat = st.selectbox("Numeric column", num_cols, key="num_by_cat")
+                _grp = df_raw.groupby(_cat_sel)[_num_by_cat].describe().round(3)
+                st.dataframe(_grp, use_container_width=True)
+                fig_box2, ax_box2 = plt.subplots(figsize=(max(6, df_raw[_cat_sel].nunique()*0.7), 4))
+                _cats_sorted = df_raw[_cat_sel].value_counts().head(15).index.tolist()
+                _box_data = [df_raw[df_raw[_cat_sel]==c][_num_by_cat].dropna().values for c in _cats_sorted]
+                ax_box2.boxplot(_box_data, labels=_cats_sorted, patch_artist=True,
+                                boxprops=dict(facecolor="#dbeafe", color=C_BLUE),
+                                medianprops=dict(color=C_GOLD, linewidth=2))
+                ax_box2.set_title(f"{_num_by_cat} by {_cat_sel}")
+                plt.xticks(rotation=30, ha="right")
+                fig_box2.tight_layout(); st.pyplot(fig_box2); plt.close(fig_box2)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 4 — CORRELATION
+    # ════════════════════════════════════════════════════
+    with t_corr:
+        if len(num_cols) < 2:
+            st.info("Need at least 2 numeric columns.")
+        else:
+            _cr1, _cr2, _cr3 = st.columns(3)
+            with _cr1: _corr_method = st.selectbox("Method", ["pearson","spearman","kendall"], key="corr_meth")
+            with _cr2: _corr_thresh = st.slider("Highlight |corr| ≥", 0.0, 1.0, 0.7, 0.05, key="corr_thr")
+            with _cr3: _corr_mask   = st.checkbox("Mask upper triangle", value=True, key="corr_mask")
+
+            @st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+            def _corr_cached(b, method): return load_csv(b).select_dtypes(include=np.number).corr(method=method)
+            corr = _corr_cached(fb, _corr_method)
+
+            fig_cr, ax_cr = plt.subplots(figsize=(max(6,len(corr)*0.65), max(5,len(corr)*0.6)))
+            _mask = np.triu(np.ones_like(corr, dtype=bool)) if _corr_mask else None
+            sns.heatmap(corr, mask=_mask, annot=True, fmt=".2f", cmap="RdBu_r", center=0,
+                        linewidths=0.4, linecolor="#e2e6ea", ax=ax_cr,
+                        cbar_kws={"shrink":0.8}, annot_kws={"size":8},
+                        vmin=-1, vmax=1)
+            ax_cr.set_title(f"Correlation Matrix ({_corr_method.capitalize()})")
+            fig_cr.tight_layout(); st.pyplot(fig_cr); plt.close(fig_cr)
+
+            # Highly correlated pairs
+            st.markdown(f"**Pairs with |correlation| ≥ {_corr_thresh}:**")
+            _pairs = []
+            for i in range(len(corr.columns)):
+                for j in range(i+1, len(corr.columns)):
+                    _v = corr.iloc[i,j]
+                    if abs(_v) >= _corr_thresh:
+                        _pairs.append({"Feature A": corr.columns[i], "Feature B": corr.columns[j],
+                                       "Correlation": round(_v,4),
+                                       "Strength": "Strong" if abs(_v)>=0.9 else "Moderate"})
+            if _pairs:
+                st.dataframe(pd.DataFrame(_pairs).sort_values("Correlation",key=abs,ascending=False),
+                             use_container_width=True)
+                if any(abs(p["Correlation"])>=0.95 for p in _pairs):
+                    st.warning("⚠️ Near-perfect correlation detected — possible multicollinearity or duplicate features.")
+            else:
+                st.success(f"✅ No pairs with |corr| ≥ {_corr_thresh}")
+
+            # Scatter for selected pair
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Scatter plot for a feature pair:**")
+            _scx = st.selectbox("X-axis", num_cols, key="sc_x")
+            _scy = st.selectbox("Y-axis", [c for c in num_cols if c!=_scx], key="sc_y")
+            _hue_col = st.selectbox("Color by (optional)", ["none"]+cat_cols, key="sc_hue")
+            fig_sc, ax_sc = plt.subplots(figsize=(7,4))
+            if _hue_col=="none":
+                ax_sc.scatter(df_raw[_scx], df_raw[_scy], alpha=0.45, color=C_BLUE, s=18)
+            else:
+                _cats_u = df_raw[_hue_col].value_counts().head(8).index
+                _pal = [C_BLUE,C_GOLD,C_GREEN,C_RED,C_PURPLE,C_SLATE,"#06b6d4","#f97316"]
+                for _ci, _cv in enumerate(_cats_u):
+                    _m = df_raw[_hue_col]==_cv
+                    ax_sc.scatter(df_raw.loc[_m,_scx], df_raw.loc[_m,_scy],
+                                  alpha=0.55, color=_pal[_ci%len(_pal)], s=18, label=str(_cv))
+                ax_sc.legend(fontsize=8, markerscale=1.5)
+            # Trend line
+            _valid = df_raw[[_scx,_scy]].dropna()
+            if len(_valid)>2:
+                _z = np.polyfit(_valid[_scx], _valid[_scy], 1)
+                _xr= np.linspace(_valid[_scx].min(), _valid[_scx].max(), 100)
+                ax_sc.plot(_xr, np.polyval(_z,_xr), color=C_RED, linewidth=1.5, linestyle="--", label="Trend")
+            ax_sc.set_xlabel(_scx); ax_sc.set_ylabel(_scy)
+            ax_sc.set_title(f"{_scx} vs {_scy}  (r={corr.loc[_scx,_scy]:.3f})" if _scx in corr and _scy in corr else f"{_scx} vs {_scy}")
+            fig_sc.tight_layout(); st.pyplot(fig_sc); plt.close(fig_sc)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 5 — OUTLIERS
+    # ════════════════════════════════════════════════════
+    with t_out:
+        if not num_cols:
+            st.info("No numeric columns.")
+        else:
+            _ot1, _ot2 = st.columns(2)
+            with _ot1: _out_col = st.selectbox("Column", num_cols, key="out_col")
+            with _ot2: _out_meth = st.selectbox("Detection method", ["IQR (Tukey)","Z-Score","Modified Z-Score"], key="out_meth")
+            _out_s = df_raw[_out_col].dropna()
+
+            if _out_meth == "IQR (Tukey)":
+                _q1, _q3 = _out_s.quantile(0.25), _out_s.quantile(0.75)
+                _iqr = _q3 - _q1
+                _k = st.slider("IQR multiplier", 1.0, 3.0, 1.5, 0.1, key="iqr_k")
+                _lo, _hi = _q1 - _k*_iqr, _q3 + _k*_iqr
+                _out_mask = (_out_s < _lo) | (_out_s > _hi)
+                _method_label = f"IQR×{_k}"
+            elif _out_meth == "Z-Score":
+                _thresh = st.slider("Z-score threshold", 1.5, 5.0, 3.0, 0.1, key="z_thresh")
+                _zs = np.abs(_sp_stats.zscore(_out_s))
+                _out_mask = _zs > _thresh
+                _lo = _hi = None
+                _method_label = f"Z>{_thresh}"
+            else:  # Modified Z-Score
+                _thresh = st.slider("Modified Z threshold", 1.5, 5.0, 3.5, 0.1, key="mz_thresh")
+                _med = np.median(_out_s); _mad = np.median(np.abs(_out_s - _med))
+                _mzs = 0.6745*(_out_s - _med)/_mad if _mad>0 else pd.Series(np.zeros(len(_out_s)), index=_out_s.index)
+                _out_mask = np.abs(_mzs) > _thresh
+                _lo = _hi = None
+                _method_label = f"Mod-Z>{_thresh}"
+
+            _n_out = int(_out_mask.sum())
+            _out_pct = _n_out/len(_out_s)*100
+
+            _om1,_om2,_om3 = st.columns(3)
+            _om1.markdown(f'<div class="dm-kpi red"><div class="val">{_n_out}</div><div class="lbl">Outliers found</div></div>', unsafe_allow_html=True)
+            _om2.markdown(f'<div class="dm-kpi"><div class="val">{_out_pct:.2f}%</div><div class="lbl">of column</div></div>', unsafe_allow_html=True)
+            _om3.markdown(f'<div class="dm-kpi gold"><div class="val">{_method_label}</div><div class="lbl">Method</div></div>', unsafe_allow_html=True)
+
+            fig_ot, (ax_ot1, ax_ot2) = plt.subplots(1,2,figsize=(12,4))
+            # Scatter with outliers
+            _idx = np.arange(len(_out_s))
+            ax_ot1.scatter(_idx[~_out_mask], _out_s[~_out_mask], color=C_BLUE, s=8, alpha=0.5, label="Normal")
+            ax_ot1.scatter(_idx[_out_mask],  _out_s[_out_mask],  color=C_RED,  s=20,alpha=0.8, label=f"Outlier ({_n_out})", zorder=5)
+            if _lo is not None:
+                ax_ot1.axhline(_lo, color=C_GOLD, linestyle="--", linewidth=1.2, label=f"Lower ({_lo:.2f})")
+                ax_ot1.axhline(_hi, color=C_GOLD, linestyle="--", linewidth=1.2, label=f"Upper ({_hi:.2f})")
+            ax_ot1.set_title(f"{_out_col} — Outlier Detection ({_method_label})")
+            ax_ot1.legend(fontsize=8)
+            # Box + strip
+            ax_ot2.boxplot(_out_s, patch_artist=True,
+                           boxprops=dict(facecolor="#dbeafe",color=C_BLUE),
+                           medianprops=dict(color=C_GOLD,linewidth=2),
+                           flierprops=dict(marker="o",markerfacecolor=C_RED,markersize=5,alpha=0.6))
+            ax_ot2.set_title(f"{_out_col} — Box & Whisker")
+            fig_ot.tight_layout(); st.pyplot(fig_ot); plt.close(fig_ot)
+
+            if _n_out > 0:
+                with st.expander(f"👁 View {min(_n_out,100)} outlier rows"):
+                    _out_rows = df_raw[df_raw.index.isin(_out_s[_out_mask].index)]
+                    st.dataframe(_out_rows.head(100), use_container_width=True)
+
+            # All columns outlier summary
+            st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
+            st.markdown("**Outlier summary — all numeric columns (IQR method):**")
+            _out_summary = []
+            for _nc in num_cols:
+                _s2 = df_raw[_nc].dropna()
+                if len(_s2)==0: continue
+                _q1b,_q3b = _s2.quantile(.25),_s2.quantile(.75)
+                _iqrb = _q3b-_q1b
+                _cnt = int(((_s2<_q1b-1.5*_iqrb)|(_s2>_q3b+1.5*_iqrb)).sum())
+                _out_summary.append({"Column":_nc,"Outliers":_cnt,"Pct%":round(_cnt/len(_s2)*100,2)})
+            _out_sum_df = pd.DataFrame(_out_summary).sort_values("Outliers",ascending=False)
+            st.dataframe(_out_sum_df, use_container_width=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 6 — MISSING DATA
+    # ════════════════════════════════════════════════════
+    with t_miss:
+        miss = df_raw.isnull().sum().sort_values(ascending=False)
+        miss = miss[miss>0]
+        if miss.empty:
+            st.success("✅ No missing values — dataset is complete!")
+        else:
+            _miss_df = pd.DataFrame({
+                "Column": miss.index,
+                "Missing Count": miss.values,
+                "Missing %": (miss.values/len(df_raw)*100).round(2),
+                "DType": [str(df_raw[c].dtype) for c in miss.index],
+            })
+            st.dataframe(_miss_df, use_container_width=True)
+
+            fig_ms, (ax_ms1, ax_ms2) = plt.subplots(1,2,figsize=(13,max(3,len(miss)*0.4+1)))
+            bars_ms = ax_ms1.barh(miss.index[::-1], miss.values[::-1], color=C_RED, alpha=0.82, edgecolor="white")
+            ax_ms1.bar_label(bars_ms, padding=3, fontsize=8)
+            ax_ms1.set_xlabel("Missing count"); ax_ms1.set_title("Missing Values Count")
+
+            _miss_pct = (miss/len(df_raw)*100)
+            bars_ms2 = ax_ms2.barh(_miss_pct.index[::-1], _miss_pct.values[::-1], color=C_GOLD, alpha=0.82, edgecolor="white")
+            ax_ms2.bar_label(bars_ms2, fmt="%.1f%%", padding=3, fontsize=8)
+            ax_ms2.set_xlabel("Missing %"); ax_ms2.set_title("Missing Values %")
+            fig_ms.tight_layout(); st.pyplot(fig_ms); plt.close(fig_ms)
+
+            # Missing pattern heatmap
+            if len(miss) > 1:
+                st.markdown("**Missing value pattern heatmap:**")
+                _miss_cols = miss.index.tolist()[:20]
+                _miss_mat = df_raw[_miss_cols].isnull().astype(int).head(200)
+                fig_mp, ax_mp = plt.subplots(figsize=(max(6,len(_miss_cols)*0.6), 4))
+                sns.heatmap(_miss_mat.T, cmap=["#d1fae5","#fee2e2"], cbar=False,
+                            yticklabels=_miss_cols, ax=ax_mp,
+                            linewidths=0.1, linecolor="#e2e6ea")
+                ax_mp.set_xlabel("Row index (first 200)"); ax_mp.set_title("Missing Pattern (red=missing)")
+                fig_mp.tight_layout(); st.pyplot(fig_mp); plt.close(fig_mp)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 7 — STATISTICAL TESTS
+    # ════════════════════════════════════════════════════
+    with t_test:
+        st.markdown("#### 🧪 Statistical Hypothesis Tests")
+        _test_type = st.selectbox("Test", [
+            "Normality — Shapiro-Wilk",
+            "Normality — D'Agostino K²",
+            "Two-sample t-test (independent)",
+            "Paired t-test",
+            "Mann-Whitney U (non-parametric)",
+            "One-way ANOVA",
+            "Chi-Square (categorical independence)",
+            "Levene's test (equal variance)",
+        ], key="stat_test")
+
+        st.markdown('<div class="dm-card">', unsafe_allow_html=True)
+        if "Normality" in _test_type:
+            _nt_col = st.selectbox("Column to test", num_cols, key="nt_col")
+            _nt_s = df_raw[_nt_col].dropna()
+            if len(_nt_s) > 5000:
+                st.info(f"Sampling 5000 rows from {len(_nt_s)} for test.")
+                _nt_s = _nt_s.sample(5000, random_state=42)
+            if st.button("▶ Run Test", key="run_norm"):
+                if "Shapiro" in _test_type:
+                    _stat, _p = _sp_stats.shapiro(_nt_s)
+                    _test_name = "Shapiro-Wilk"
+                else:
+                    _stat, _p = _sp_stats.normaltest(_nt_s)
+                    _test_name = "D'Agostino K²"
+                _pass = _p >= 0.05
+                st.markdown(f"**{_test_name} Result:**")
+                st.markdown(f"- Statistic: `{_stat:.6f}`")
+                st.markdown(f"- p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ Normal (p≥0.05)' if _pass else '❌ Not Normal (p<0.05)'}**")
+                if not _pass:
+                    st.info("💡 Consider log-transform, Box-Cox, or use non-parametric models.")
+
+        elif "Two-sample t-test" in _test_type or "Mann-Whitney" in _test_type:
+            _tt1 = st.selectbox("Numeric column", num_cols, key="tt_col")
+            if cat_cols:
+                _tt_grp = st.selectbox("Group by (categorical)", cat_cols, key="tt_grp")
+                _groups = df_raw[_tt_grp].value_counts().head(10).index.tolist()
+                _g1, _g2 = st.columns(2)
+                with _g1: _grp1 = st.selectbox("Group 1", _groups, key="g1")
+                with _g2: _grp2 = st.selectbox("Group 2", [g for g in _groups if g!=_grp1], key="g2")
+            else:
+                st.info("No categorical columns for grouping."); _tt_grp=_grp1=_grp2=None
+            _alpha = st.slider("Significance level α", 0.01, 0.1, 0.05, 0.01, key="alpha_tt")
+            if st.button("▶ Run Test", key="run_tt") and _tt_grp:
+                _s1 = df_raw[df_raw[_tt_grp]==_grp1][_tt1].dropna()
+                _s2 = df_raw[df_raw[_tt_grp]==_grp2][_tt1].dropna()
+                if "Mann" in _test_type:
+                    _stat,_p = _sp_stats.mannwhitneyu(_s1,_s2,alternative="two-sided")
+                    _tname = "Mann-Whitney U"
+                else:
+                    _stat,_p = _sp_stats.ttest_ind(_s1,_s2)
+                    _tname = "Independent t-test"
+                _pass = _p >= _alpha
+                st.markdown(f"**{_tname}: {_grp1} vs {_grp2}**")
+                st.markdown(f"- n₁={len(_s1)}, n₂={len(_s2)}")
+                st.markdown(f"- Mean₁={_s1.mean():.4f}, Mean₂={_s2.mean():.4f}")
+                st.markdown(f"- Statistic: `{_stat:.4f}`, p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ No significant difference (fail to reject H₀)' if _pass else f'❌ Significant difference at α={_alpha}'}**")
+
+        elif "ANOVA" in _test_type:
+            _an_col = st.selectbox("Numeric column", num_cols, key="an_col")
+            _an_grp = st.selectbox("Group by", cat_cols, key="an_grp") if cat_cols else None
+            if st.button("▶ Run ANOVA", key="run_anova") and _an_grp:
+                _groups_data = [df_raw[df_raw[_an_grp]==g][_an_col].dropna().values
+                                for g in df_raw[_an_grp].unique() if len(df_raw[df_raw[_an_grp]==g])>1]
+                _fstat, _p = _sp_stats.f_oneway(*_groups_data)
+                st.markdown(f"**One-way ANOVA: {_an_col} by {_an_grp}**")
+                st.markdown(f"- F-statistic: `{_fstat:.4f}`, p-value: `{_p:.6f}`")
+                st.markdown(f"- **{'✅ No significant group difference' if _p>=0.05 else '❌ Significant group difference (p<0.05)'}**")
+
+        elif "Chi-Square" in _test_type:
+            if len(cat_cols) >= 2:
+                _chi1 = st.selectbox("Column A", cat_cols, key="chi1")
+                _chi2 = st.selectbox("Column B", [c for c in cat_cols if c!=_chi1], key="chi2")
+                if st.button("▶ Run Chi-Square", key="run_chi"):
+                    _ct = pd.crosstab(df_raw[_chi1], df_raw[_chi2])
+                    _chi2s, _p, _dof, _exp = _sp_stats.chi2_contingency(_ct)
+                    st.markdown(f"**Chi-Square Test: {_chi1} × {_chi2}**")
+                    st.markdown(f"- χ² = `{_chi2s:.4f}`, df = `{_dof}`, p-value = `{_p:.6f}`")
+                    st.markdown(f"- **{'✅ Independent (p≥0.05)' if _p>=0.05 else '❌ Dependent / associated (p<0.05)'}**")
+                    st.dataframe(_ct, use_container_width=True)
+            else:
+                st.info("Need at least 2 categorical columns.")
+
+        elif "Levene" in _test_type:
+            _lev_col = st.selectbox("Numeric column", num_cols, key="lev_col")
+            _lev_grp = st.selectbox("Group by", cat_cols, key="lev_grp") if cat_cols else None
+            if st.button("▶ Run Levene", key="run_lev") and _lev_grp:
+                _gdata = [df_raw[df_raw[_lev_grp]==g][_lev_col].dropna().values
+                          for g in df_raw[_lev_grp].unique() if len(df_raw[df_raw[_lev_grp]==g])>1]
+                _lstat, _lp = _sp_stats.levene(*_gdata)
+                st.markdown(f"**Levene's Test: {_lev_col} by {_lev_grp}**")
+                st.markdown(f"- Statistic: `{_lstat:.4f}`, p-value: `{_lp:.6f}`")
+                st.markdown(f"- **{'✅ Equal variances (p≥0.05)' if _lp>=0.05 else '❌ Unequal variances (p<0.05) — use Welch t-test'}**")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════
+    #  TAB 8 — TIME SERIES
+    # ════════════════════════════════════════════════════
+    with t_ts:
+        st.markdown("#### 📅 Time Series Analysis")
+        _date_candidates = [c for c in df_raw.columns
+                            if df_raw[c].dtype == "object" and df_raw[c].str.match(r"\d{4}").any()]
+        _date_candidates += [c for c in df_raw.columns if "date" in c.lower() or "time" in c.lower()]
+        _date_candidates = list(dict.fromkeys(_date_candidates))
+
+        if not _date_candidates and not num_cols:
+            st.info("No date/time columns detected. Make sure your date column has recognisable date strings.")
+        else:
+            _ts_date = st.selectbox("Date/time column", _date_candidates if _date_candidates else num_cols, key="ts_date")
+            _ts_val  = st.selectbox("Value column", num_cols, key="ts_val")
+            _ts_agg  = st.selectbox("Aggregation", ["None","Daily","Weekly","Monthly"], key="ts_agg")
+
+            if st.button("▶ Plot Time Series", key="ts_plot"):
+                try:
+                    _ts_df = df_raw[[_ts_date, _ts_val]].copy().dropna()
+                    _ts_df[_ts_date] = pd.to_datetime(_ts_df[_ts_date], errors="coerce")
+                    _ts_df = _ts_df.dropna(subset=[_ts_date]).sort_values(_ts_date)
+
+                    if _ts_agg != "None":
+                        _freq = {"Daily":"D","Weekly":"W","Monthly":"ME"}[_ts_agg]
+                        _ts_df = _ts_df.set_index(_ts_date)[_ts_val].resample(_freq).mean().reset_index()
+                        _ts_df.columns = [_ts_date, _ts_val]
+
+                    fig_ts, axes_ts = plt.subplots(3, 1, figsize=(12, 9))
+
+                    # Line plot
+                    axes_ts[0].plot(_ts_df[_ts_date], _ts_df[_ts_val], color=C_BLUE, linewidth=1.2)
+                    axes_ts[0].fill_between(_ts_df[_ts_date], _ts_df[_ts_val], alpha=0.12, color=C_BLUE)
+                    # Rolling mean
+                    _win = max(3, len(_ts_df)//20)
+                    _roll = _ts_df[_ts_val].rolling(_win, center=True).mean()
+                    axes_ts[0].plot(_ts_df[_ts_date], _roll, color=C_RED, linewidth=2,
+                                    linestyle="--", label=f"Rolling mean ({_win})")
+                    axes_ts[0].legend(fontsize=8)
+                    _agg_label = _ts_agg if _ts_agg != "None" else "raw"
+                    axes_ts[0].set_title(f"{_ts_val} over time ({_agg_label})")
+
+                    # Rolling std (volatility)
+                    _rstd = _ts_df[_ts_val].rolling(_win, center=True).std()
+                    axes_ts[1].plot(_ts_df[_ts_date], _rstd, color=C_GOLD, linewidth=1.2)
+                    axes_ts[1].fill_between(_ts_df[_ts_date], _rstd, alpha=0.2, color=C_GOLD)
+                    axes_ts[1].set_title(f"Rolling Std Dev (window={_win}) — Volatility")
+
+                    # First-difference (change)
+                    _diff = _ts_df[_ts_val].diff()
+                    _pos = _diff >= 0
+                    axes_ts[2].bar(_ts_df[_ts_date][_pos],  _diff[_pos],  color=C_GREEN, alpha=0.7, width=1)
+                    axes_ts[2].bar(_ts_df[_ts_date][~_pos], _diff[~_pos], color=C_RED,   alpha=0.7, width=1)
+                    axes_ts[2].axhline(0, color=C_SLATE, linewidth=0.8)
+                    axes_ts[2].set_title("Period-over-Period Change")
+
+                    fig_ts.tight_layout(); st.pyplot(fig_ts); plt.close(fig_ts)
+
+                    # Stats
+                    st.markdown(f"**Period:** {_ts_df[_ts_date].min().date()} → {_ts_df[_ts_date].max().date()} ({len(_ts_df)} points)")
+                    _pct_chg = (_ts_df[_ts_val].iloc[-1] - _ts_df[_ts_val].iloc[0]) / abs(_ts_df[_ts_val].iloc[0]) * 100
+                    st.markdown(f"**Total change:** {_pct_chg:+.2f}%  |  **Max:** {_ts_df[_ts_val].max():.4f}  |  **Min:** {_ts_df[_ts_val].min():.4f}")
+
+                except Exception as _tse:
+                    st.error(f"Time series error: {_tse}")
+
+    # ════════════════════════════════════════════════════
+    #  TAB 9 — PAIRPLOT
+    # ════════════════════════════════════════════════════
+    with t_pair:
+        if len(num_cols) < 2:
+            st.info("Need at least 2 numeric columns for a pairplot.")
+        else:
+            _pp_cols = st.multiselect("Select columns (max 6 recommended)",
+                                      num_cols, default=num_cols[:min(4,len(num_cols))], key="pp_cols")
+            _pp_hue  = st.selectbox("Color by (optional)", ["none"]+cat_cols, key="pp_hue")
+            _pp_diag = st.selectbox("Diagonal", ["hist","kde"], key="pp_diag")
+            if st.button("▶ Generate Pairplot", key="pp_btn") and len(_pp_cols)>=2:
+                with st.spinner("Rendering pairplot…"):
+                    _pp_df = df_raw[_pp_cols+([_pp_hue] if _pp_hue!="none" else [])].dropna()
+                    if len(_pp_df) > 2000:
+                        _pp_df = _pp_df.sample(2000, random_state=42)
+                        st.info("Sampled 2000 rows for performance.")
+                    try:
+                        _hue_arg = _pp_hue if _pp_hue!="none" else None
+                        _pp_fig = sns.pairplot(_pp_df, vars=_pp_cols, hue=_hue_arg,
+                                               diag_kind=_pp_diag, plot_kws={"alpha":0.4,"s":12},
+                                               palette="tab10" if _hue_arg else None)
+                        _pp_fig.figure.suptitle("Pairplot", y=1.01, fontsize=12, fontweight="bold")
+                        st.pyplot(_pp_fig.figure); plt.close()
+                    except Exception as _ppe:
+                        st.error(f"Pairplot error: {_ppe}")
+
+    # ════════════════════════════════════════════════════
+    #  TAB 10 — REPORT
+    # ════════════════════════════════════════════════════
+    with t_rep:
+        st.markdown("#### 📄 Automated EDA Report")
+        st.markdown("Generate a full text summary of your dataset.")
+        if st.button("📝 Generate Report", key="rep_btn"):
+            _lines = []
+            _lines.append(f"# DataMind AI — EDA Report")
+            _lines.append(f"**Dataset shape:** {df_raw.shape[0]:,} rows × {df_raw.shape[1]} columns")
+            _lines.append(f"**Memory usage:** {df_raw.memory_usage(deep=True).sum()/1024**2:.2f} MB")
+            _lines.append(f"**Numeric columns ({len(num_cols)}):** {', '.join(num_cols)}")
+            _lines.append(f"**Categorical columns ({len(cat_cols)}):** {', '.join(cat_cols)}")
+            _lines.append(f"**Missing values:** {miss_total} ({miss_total/df_raw.size*100:.2f}% of all cells)")
+            _lines.append(f"**Duplicate rows:** {dup_total}")
+            _lines.append("")
+            _lines.append("## Numeric Summary")
+            for _nc in num_cols:
+                _s = df_raw[_nc].dropna()
+                _sk = _s.skew(); _ku = _s.kurtosis()
+                _q1b,_q3b = _s.quantile(.25),_s.quantile(.75)
+                _iqrb = _q3b-_q1b
+                _n_out = int(((_s<_q1b-1.5*_iqrb)|(_s>_q3b+1.5*_iqrb)).sum())
+                _lines.append(f"**{_nc}:** mean={_s.mean():.4f}, std={_s.std():.4f}, "
+                              f"min={_s.min():.4f}, max={_s.max():.4f}, "
+                              f"skew={_sk:.2f}, kurt={_ku:.2f}, "
+                              f"missing={_s.isna().sum()}, outliers~{_n_out}")
+            _lines.append("")
+            _lines.append("## Categorical Summary")
+            for _cc in cat_cols:
+                _vc2 = df_raw[_cc].value_counts()
+                _lines.append(f"**{_cc}:** {_vc2.shape[0]} unique values, "
+                              f"top='{_vc2.index[0]}' ({_vc2.iloc[0]} times), "
+                              f"missing={df_raw[_cc].isna().sum()}")
+            _lines.append("")
+            _lines.append("## Recommendations")
+            if miss_total > 0:
+                _miss_cols2 = df_raw.columns[df_raw.isnull().any()].tolist()
+                _lines.append(f"⚠️ **Missing data** in: {', '.join(_miss_cols2)} — apply imputation before modelling.")
+            if dup_total > 0:
+                _lines.append(f"⚠️ **{dup_total} duplicate rows** found — consider deduplication.")
+            _high_skew = [c for c in num_cols if abs(df_raw[c].skew()) > 1]
+            if _high_skew:
+                _lines.append(f"⚠️ **High skewness** in: {', '.join(_high_skew)} — consider log/sqrt transform.")
+            _high_corr_pairs = []
+            if len(num_cols)>=2:
+                _cr2 = df_raw[num_cols].corr().abs()
+                for _i in range(len(num_cols)):
+                    for _j in range(_i+1, len(num_cols)):
+                        if _cr2.iloc[_i,_j] >= 0.9:
+                            _high_corr_pairs.append(f"{num_cols[_i]}↔{num_cols[_j]}")
+            if _high_corr_pairs:
+                _lines.append(f"⚠️ **Near-perfect correlation:** {', '.join(_high_corr_pairs)} — possible multicollinearity.")
+            if not miss_total and not dup_total and not _high_skew and not _high_corr_pairs:
+                _lines.append("✅ Dataset looks clean! No major issues detected.")
+
+            _report_text = "\n\n".join(_lines)
+            st.markdown(_report_text)
+            st.download_button("⬇️ Download Report (.md)",
+                               data=_report_text.encode("utf-8"),
+                               file_name="datamind_eda_report.md",
+                               mime="text/markdown", key="dl_report")
 elif page=="📈 Evaluation":
     st.markdown("""<div class="dm-pagehead"><div class="icon">📈</div>
     <div><div class="title">Model Evaluation</div>
