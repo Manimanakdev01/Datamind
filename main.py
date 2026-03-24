@@ -2178,7 +2178,8 @@ if page=="📊 Analysis":
                     axes_ts[0].plot(_ts_df[_ts_date], _roll, color=C_RED, linewidth=2,
                                     linestyle="--", label=f"Rolling mean ({_win})")
                     axes_ts[0].legend(fontsize=8)
-                    axes_ts[0].set_title(f"{_ts_val} over time ({_ts_agg if _ts_agg!="None" else "raw"})")
+                    _agg_label = _ts_agg if _ts_agg != "None" else "raw"
+                    axes_ts[0].set_title(f"{_ts_val} over time ({_agg_label})")
 
                     # Rolling std (volatility)
                     _rstd = _ts_df[_ts_val].rolling(_win, center=True).std()
