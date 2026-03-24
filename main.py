@@ -129,7 +129,7 @@ except Exception:
     pass
 
 # ── App constants ────────────────────────────────────────────────────────────
-PLAN_PRICE     = 300
+PLAN_PRICE     = 1000
 PLAN_FREE_PROJ = 2
 UPI_ID         = "8789390866@ybl"
 UPI_NAME       = "DataMind AI"
