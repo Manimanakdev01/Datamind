@@ -520,20 +520,31 @@ def _validate_utr(utr: str):
 
 def _submit_payment(uid, utr):
     """
-    Submit a payment for admin review.
-    Sets plan to 'pending_review' — admin must approve from the Admin panel.
+    Auto-activates Premium immediately after UTR submission.
+    No admin approval needed — Premium starts instantly for 30 days.
     Returns (True, message) on success, (False, error) on failure.
     """
     utr = utr.strip()
     ok, err = _validate_utr(utr)
     if not ok:
         return False, err
+    _paid_until = (datetime.datetime.utcnow() + datetime.timedelta(days=30)).isoformat()
     _rtdb_update_user(uid, {
-        "plan":       "pending_review",
-        "last_utr":   utr,
-        "payment_ts": datetime.datetime.utcnow().isoformat(),
+        "plan":           "premium",
+        "paid_until":     _paid_until,
+        "last_utr":       utr,
+        "payment_ts":     datetime.datetime.utcnow().isoformat(),
+        "payment_method": "upi_manual",
+        "proj_used":      0,
     })
-    return True, "Payment submitted! Your account will be activated within 24 hours after admin verification."
+    import streamlit as _st
+    _st.session_state.auth_plan       = "premium"
+    _st.session_state.auth_proj_used  = 0
+    try:
+        _st.session_state.auth_paid_until = datetime.datetime.fromisoformat(_paid_until)
+    except Exception:
+        pass
+    return True, "Payment verified! Premium activated for 30 days. Enjoy full access!"
 
 def _increment_project(uid):
     if st.session_state.auth_plan == "premium":
@@ -558,7 +569,7 @@ def _require_premium(feature_name="this feature"):
             '<div style="font-size:0.85rem;color:#374151;">'
             'Your payment is being verified by our team.<br>'
             '<strong>' + feature_name + '</strong> will unlock automatically '
-            'once your UTR is approved (within 24 hours).'
+            'Premium activates instantly once your Transaction ID is submitted.'
             '</div></div>', unsafe_allow_html=True)
         return False
     st.markdown(
@@ -1006,7 +1017,7 @@ def _left_base(tagline, extra_html=""):
         + extra_html +
         '<div class="al-chips">'
         '<span class="al-chip">Free &middot; 2 Projects</span>'
-        '<span class="al-chip">Premium &middot; &#8377;1000/mo</span>'
+        '<span class="al-chip">Premium &middot; &#8377;300/mo</span>'
         '<span class="al-chip">Firebase Auth</span>'
         '<span class="al-chip">Realtime DB</span>'
         '</div>'
@@ -1111,7 +1122,7 @@ elif st.session_state.auth_page == "payment":
 
     _pricebox = (
         '<div class="al-pricebox">'
-        '<div><span class="amount">&#8377;1000</span>'
+        '<div><span class="amount">&#8377;300</span>'
         '<span class="per">/ month</span></div>'
         '<div class="sub">30 days full access &middot; Renew anytime</div>'
         '</div>'
@@ -1158,7 +1169,7 @@ elif st.session_state.auth_page == "payment":
                 '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
                 'padding:.55rem .85rem;font-size:.75rem;color:#92400e;margin:.6rem 0 .4rem;">'
                 '&#9888; After paying, copy your <strong>Transaction / Payment ID</strong> and '
-                'submit it in the <strong>UPI / Manual</strong> tab for activation (within 24 h).'
+                'submit it in the <strong>UPI / Manual</strong> tab — Premium activates instantly!'
                 '</div>',
                 unsafe_allow_html=True)
 
@@ -1203,7 +1214,7 @@ elif st.session_state.auth_page == "payment":
                 '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
                 'padding:.55rem .85rem;font-size:.75rem;color:#92400e;margin-bottom:.7rem;">'
                 '&#9888; After paying, paste your 12-digit <strong>UTR / Transaction ID</strong>'
-                ' from your UPI app below. Activation requires admin approval (within 24 h).</div>',
+                ' from your UPI app below. Premium activates <strong>instantly</strong> after submission.</div>',
                 unsafe_allow_html=True)
             _utr = st.text_input("UTR / Transaction ID", placeholder="e.g. 426781234567",
                                   key="pay_utr")
@@ -1260,7 +1271,7 @@ with st.sidebar:
         st.markdown(
             '<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;'
             'padding:.5rem .75rem;font-size:.72rem;color:#92400e;margin-bottom:.5rem">'
-            '⏳ Payment under review. You will be upgraded within 24 hours.</div>',
+            '⏳ Payment under review. You will be upgraded shortly.</div>',
             unsafe_allow_html=True)
     elif st.session_state.auth_plan == "free":
         if st.button("⬆️ Upgrade ₹1000/mo", use_container_width=True, key="sb_upgrade"):
@@ -3224,7 +3235,7 @@ elif page == "💳 Pricing":
     if _is_pending:
         st.warning(
             "⏳ **Payment under review.** Your UTR has been received and is being verified "
-            "by our team. Premium access will be granted within 24 hours. "
+            "Premium will be activated instantly. "
             "Contact support if it takes longer.")
 
     st.markdown('<div class="dm-divider"></div>', unsafe_allow_html=True)
@@ -3248,7 +3259,7 @@ elif page == "💳 Pricing":
               <ol style="font-size:0.85rem;line-height:2.4;color:#374151;padding-left:1.2rem">
                 <li><strong>Razorpay (Recommended):</strong> Click Pay button below — instant activation</li>
                 <li><strong>UPI Manual:</strong> Scan QR or use UPI ID, then enter 12-digit UTR</li>
-                <li>Activation is instant for Razorpay; within 24 h for manual UPI</li>
+                <li>Activation is instant for both Razorpay and manual UPI</li>
               </ol>
             </div>""", unsafe_allow_html=True)
 
@@ -3302,7 +3313,7 @@ elif page == "💳 Pricing":
                 '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;'
                 'padding:.55rem .85rem;font-size:.78rem;color:#92400e;margin-bottom:.65rem">'
                 '&#9888; Paste your 12-digit UTR from your UPI app after paying. '
-                'Admin verifies and activates within 24 hours.</div>',
+                'Premium activates instantly after submitting your Transaction ID.</div>',
                 unsafe_allow_html=True)
             _utr2 = st.text_input("UTR / Transaction ID",
                                    placeholder="12-digit UTR number", key="pricing_utr")
