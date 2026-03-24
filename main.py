@@ -234,6 +234,8 @@ for k,v in [("history",[]),("model",None),("features",[]),("train_df",None),
             ("nlp_model",None),("nlp_vectorizer",None),("nlp_classes",None),
             ("chatbot_model",None),("chatbot_vectorizer",None),
             ("chatbot_responses",{}),("chatbot_classes",[]),("chat_history",[]),
+            ("chatbot_train_inputs",[]),("chatbot_train_answers",[]),
+            ("chatbot_X_train",None),("chatbot_has_intent",False),
             ("cluster_model",None),("cluster_labels",None),("cluster_df",None)]:
     if k not in st.session_state: st.session_state[k] = v
 
@@ -3149,10 +3151,15 @@ elif page == "🤖 Chatbot":
                         clf_cb.fit(X_cb, y_cb)
                         tr_acc = float(accuracy_score(y_cb, clf_cb.predict(X_cb)))
 
-                        st.session_state.chatbot_model      = clf_cb
-                        st.session_state.chatbot_vectorizer = vec_cb
-                        st.session_state.chatbot_responses  = resp_map
-                        st.session_state.chatbot_classes    = le_cb.classes_.tolist()
+                        st.session_state.chatbot_model        = clf_cb
+                        st.session_state.chatbot_vectorizer   = vec_cb
+                        st.session_state.chatbot_responses    = resp_map
+                        st.session_state.chatbot_classes      = le_cb.classes_.tolist()
+                        # store training inputs + raw Q->A map for cosine fallback
+                        st.session_state.chatbot_train_inputs = cb_work["_input"].tolist()
+                        st.session_state.chatbot_train_answers= cb_work["_output"].tolist()
+                        st.session_state.chatbot_X_train      = X_cb
+                        st.session_state.chatbot_has_intent   = (cb_int_col != "— none —")
 
                     n_intents = len(le_cb.classes_)
                     k1cb, k2cb, k3cb = st.columns(3)
@@ -3193,25 +3200,54 @@ elif page == "🤖 Chatbot":
                         unsafe_allow_html=True)
 
             def _bot_reply(msg):
-                """Return (response, intent, confidence)."""
+                """Return (response, intent, confidence).
+                Uses cosine similarity for Q&A CSVs (no intent col) and
+                intent classification for intent-based CSVs.
+                """
+                from sklearn.metrics.pairwise import cosine_similarity as _csim
                 msg = msg.strip()
                 if not msg:
                     return "Please type something!", "—", 0.0
-                xv  = st.session_state.chatbot_vectorizer.transform([msg])
+
+                xv = st.session_state.chatbot_vectorizer.transform([msg])
+
+                has_intent  = st.session_state.get("chatbot_has_intent", False)
+                X_train     = st.session_state.get("chatbot_X_train")
+                train_ans   = st.session_state.get("chatbot_train_answers", [])
+
+                # ── For Q&A CSVs: cosine similarity against all training inputs ──
+                if not has_intent and X_train is not None and len(train_ans) > 0:
+                    sims   = _csim(xv, X_train)[0]
+                    best_i = int(np.argmax(sims))
+                    best_s = float(sims[best_i])
+                    if best_s < 0.05:
+                        # very low match — try intent classification as last resort
+                        pass
+                    else:
+                        # find all rows with similarity close to best (within 0.05)
+                        close_idx = [i for i, s in enumerate(sims)
+                                     if s >= max(0.05, best_s - 0.05)]
+                        answer = _rnd.choice([train_ans[i] for i in close_idx])
+                        intent = f"cosine_match({best_s:.2f})"
+                        return answer, intent, best_s
+
+                # ── Intent classification (intent col provided or cosine failed) ──
                 try:
                     prbs   = st.session_state.chatbot_model.predict_proba(xv)[0]
                     best_i = int(np.argmax(prbs))
                     intent = st.session_state.chatbot_classes[best_i]
                     conf   = float(prbs[best_i])
                 except AttributeError:
-                    # LinearSVC fallback (no predict_proba)
                     pred   = int(st.session_state.chatbot_model.predict(xv)[0])
                     intent = st.session_state.chatbot_classes[pred]
                     conf   = 1.0
 
-                if conf < 0.20:
-                    return ("I'm not sure I understand that. Could you rephrase?",
-                            "low_confidence", conf)
+                # Lower threshold — 0.05 instead of 0.20
+                if conf < 0.05:
+                    # Still return best guess rather than generic message
+                    resps = st.session_state.chatbot_responses.get(
+                        intent, ["I don't have a good answer for that — can you rephrase?"])
+                    return _rnd.choice(resps), intent + " (low conf)", conf
 
                 resps = st.session_state.chatbot_responses.get(
                     intent, ["I don't have a response for that."])
