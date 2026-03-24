@@ -142,7 +142,7 @@ RAZORPAY_KEY_ID     = "rzp_live_XXXXXXXXXXXXXXXX"   # ← replace
 RAZORPAY_KEY_SECRET = "XXXXXXXXXXXXXXXXXXXXXXXX"    # ← replace
 
 # ── Razorpay Payment Link (direct pay link — no API keys needed) ──────────────
-RAZORPAY_PAYMENT_LINK = "https://razorpay.me/@manikumar2019?amout=1000"
+RAZORPAY_PAYMENT_LINK = "https://razorpay.me/@manikumar2019??amount=1000"
 
 warnings.filterwarnings("ignore")
 N_JOBS = max(1, (os.cpu_count() or 2) - 1)
