@@ -12,7 +12,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
-import shap
+# shap is imported lazily inside compute_shap() to save ~150 MB at startup
 
 from sklearn.calibration   import CalibratedClassifierCV, calibration_curve
 from sklearn.ensemble      import (GradientBoostingClassifier, GradientBoostingRegressor,
@@ -31,7 +31,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes   import MultinomialNB
 from sklearn.svm           import LinearSVC
 
-# ── TensorFlow / Keras ──
+# ── TensorFlow / Keras — loaded LAZILY only when Deep Learning page is used ──
+# Declaring as None saves ~450 MB at startup for users who never visit that page.
 TF_AVAILABLE   = False
 TF_IMPORT_ERR  = ""
 KerasTokenizer = None
@@ -40,65 +41,65 @@ to_categorical = None
 keras          = None
 layers         = None
 
-try:
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-    import tensorflow as tf
-
-    # Keras 3 (TF 2.16+) ships as standalone 'keras' package
+def _ensure_tensorflow():
+    """
+    Import TensorFlow + Keras on first call and populate module-level globals.
+    Safe to call multiple times — no-op after first successful load.
+    """
+    global TF_AVAILABLE, TF_IMPORT_ERR, KerasTokenizer, pad_sequences
+    global to_categorical, keras, layers
+    if TF_AVAILABLE:
+        return True
     try:
-        import keras as _keras_pkg
-        keras  = _keras_pkg
-        layers = _keras_pkg.layers
-    except ImportError:
-        keras  = tf.keras
-        layers = tf.keras.layers
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+        import tensorflow as tf
 
-    # Preprocessing — moved in TF 2.12+; try multiple paths
-    _tok, _pad, _cat = None, None, None
-
-    # Path 1: legacy tensorflow.keras.preprocessing
-    try:
-        from tensorflow.keras.preprocessing.text     import Tokenizer as _T1
-        from tensorflow.keras.preprocessing.sequence import pad_sequences as _P1
-        from tensorflow.keras.utils                  import to_categorical as _C1
-        _tok, _pad, _cat = _T1, _P1, _C1
-    except Exception:
-        pass
-
-    # Path 2: standalone keras.preprocessing (Keras 3)
-    if _tok is None:
         try:
-            from keras.preprocessing.text     import Tokenizer as _T2
-            from keras.preprocessing.sequence import pad_sequences as _P2
-            from keras.utils                  import to_categorical as _C2
-            _tok, _pad, _cat = _T2, _P2, _C2
+            import keras as _keras_pkg
+            keras  = _keras_pkg
+            layers = _keras_pkg.layers
+        except ImportError:
+            keras  = tf.keras
+            layers = tf.keras.layers
+
+        _tok, _pad, _cat = None, None, None
+        try:
+            from tensorflow.keras.preprocessing.text     import Tokenizer as _T1
+            from tensorflow.keras.preprocessing.sequence import pad_sequences as _P1
+            from tensorflow.keras.utils                  import to_categorical as _C1
+            _tok, _pad, _cat = _T1, _P1, _C1
         except Exception:
             pass
-
-    # Path 3: tf_keras compatibility shim
-    if _tok is None:
-        try:
-            import tf_keras
-            from tf_keras.preprocessing.text     import Tokenizer as _T3
-            from tf_keras.preprocessing.sequence import pad_sequences as _P3
-            from tf_keras.utils                  import to_categorical as _C3
-            _tok, _pad, _cat = _T3, _P3, _C3
-        except Exception:
-            pass
-
-    if _tok is None:
-        raise ImportError(
-            "Could not import Keras preprocessing. "
-            "Run: pip install tf-keras  (for TF 2.16+) or downgrade to TF ≤ 2.15"
-        )
-
-    KerasTokenizer = _tok
-    pad_sequences  = _pad
-    to_categorical = _cat
-    TF_AVAILABLE   = True
-
-except Exception as _tf_err:
-    TF_IMPORT_ERR = str(_tf_err)
+        if _tok is None:
+            try:
+                from keras.preprocessing.text     import Tokenizer as _T2
+                from keras.preprocessing.sequence import pad_sequences as _P2
+                from keras.utils                  import to_categorical as _C2
+                _tok, _pad, _cat = _T2, _P2, _C2
+            except Exception:
+                pass
+        if _tok is None:
+            try:
+                import tf_keras
+                from tf_keras.preprocessing.text     import Tokenizer as _T3
+                from tf_keras.preprocessing.sequence import pad_sequences as _P3
+                from tf_keras.utils                  import to_categorical as _C3
+                _tok, _pad, _cat = _T3, _P3, _C3
+            except Exception:
+                pass
+        if _tok is None:
+            raise ImportError(
+                "Could not import Keras preprocessing. "
+                "Run: pip install tf-keras  (for TF 2.16+) or downgrade to TF ≤ 2.15"
+            )
+        KerasTokenizer = _tok
+        pad_sequences  = _pad
+        to_categorical = _cat
+        TF_AVAILABLE   = True
+        return True
+    except Exception as _tf_err:
+        TF_IMPORT_ERR = str(_tf_err)
+        return False
 
 
 # ── Firebase config — fill in YOUR project values ───────────────────────────
@@ -789,6 +790,7 @@ def encode_inputs(raw_inputs,features,label_encoders):
 # ══════════════════════════════════════════════════════════
 def compute_shap(model, X_train, X_test, features):
     try:
+        import shap as _shap   # lazy — only loaded when SHAP is actually requested (~150 MB)
         inner=model
         if hasattr(inner,"base_estimator"): inner=inner.base_estimator
         X_tr2,X_te2=X_train.copy(),X_test.copy()
@@ -799,9 +801,9 @@ def compute_shap(model, X_train, X_test, features):
                 X_tr2=pd.DataFrame(scaler.transform(X_train),columns=features)
                 X_te2=pd.DataFrame(scaler.transform(X_test), columns=features)
         if hasattr(inner,"feature_importances_"):
-            exp=shap.TreeExplainer(inner); sv=exp.shap_values(X_te2)
+            exp=_shap.TreeExplainer(inner); sv=exp.shap_values(X_te2)
         else:
-            exp=shap.LinearExplainer(inner,X_tr2); sv=exp.shap_values(X_te2)
+            exp=_shap.LinearExplainer(inner,X_tr2); sv=exp.shap_values(X_te2)
         if isinstance(sv,list):
             sv=sv[1] if len(sv)==2 else np.mean(np.abs(sv),axis=0)
         return np.array(sv)
@@ -894,11 +896,23 @@ def _plot_avp(yt,yp):
 # ══════════════════════════════════════════════════════════
 #  CACHED HEAVY MODELS (cache_resource keeps ONE instance)
 # ══════════════════════════════════════════════════════════
-@st.cache_resource(show_spinner="Loading embedding model…")
 def _load_st_model():
-    """Sentence-transformer loaded once and shared across all sessions."""
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    """
+    Returns a fresh unfitted LSA pipeline each call (construction is instant).
+    TF-IDF + TruncatedSVD (300-dim) + L2 normalisation.
+    Uses only sklearn — no PyTorch, no sentence-transformers (~0 MB overhead).
+    Fitted pipeline is stored in st.session_state.rag_embeddings by the RAG page.
+    """
+    from sklearn.pipeline               import Pipeline as _PL
+    from sklearn.feature_extraction.text import TfidfVectorizer as _TV
+    from sklearn.decomposition          import TruncatedSVD as _SVD
+    from sklearn.preprocessing          import Normalizer as _NM
+    return _PL([
+        ("tfidf", _TV(max_features=50_000, ngram_range=(1, 2),
+                      strip_accents="unicode", sublinear_tf=True)),
+        ("svd",   _SVD(n_components=300, random_state=42)),
+        ("norm",  _NM(norm="l2")),   # unit vectors → dot product = cosine similarity
+    ])
 
 @st.cache_resource(show_spinner=False)
 def _get_tfidf_vectorizer(max_features=15000):
@@ -1239,7 +1253,7 @@ section[data-testid="stSidebar"]{display:none!important;}
     <div class="feat-card">
       <div class="feat-icon green">&#128270;</div>
       <div class="feat-title">RAG with Cosine Similarity</div>
-      <div class="feat-desc">Upload PDFs, CSVs, or docs and ask natural language questions. Powered by sentence-transformers and pure cosine similarity — no external vector DB needed.</div>
+      <div class="feat-desc">Upload PDFs, CSVs, or docs and ask natural language questions. Powered by LSA (TF-IDF + SVD) cosine similarity — no external vector DB, no PyTorch, no extra install needed.</div>
       <div class="feat-tag">Cosine Similarity &middot; Semantic Search</div>
     </div>
     <div class="feat-card">
@@ -2977,13 +2991,8 @@ elif page=="🔬 Rag":
                    ("rag_query_history",[]),("rag_last_results",None)]:
         if _k not in st.session_state: st.session_state[_k] = _v
 
-    # ── library availability check ──
-    ST_OK = False
-    try:
-        from sentence_transformers import SentenceTransformer as _STE
-        ST_OK = True
-    except ImportError:
-        pass
+    # ── library availability check — sklearn is always available ──
+    ST_OK = True   # LSA via sklearn: no extra install needed
 
     # ════════════════════════════════════
     # ── helpers ──
@@ -3024,29 +3033,30 @@ elif page=="🔬 Rag":
         return ""
 
     def _build_cosine_index(chunks):
-        """Encode chunks with sentence-transformers; return L2-normalised embedding matrix."""
-        from sklearn.preprocessing import normalize as _sk_norm
-        model = _load_st_model()
-        embeddings = model.encode(chunks, show_progress_bar=False,
-                                  batch_size=64, convert_to_numpy=True)
-        embeddings = _sk_norm(embeddings.astype("float32"))   # unit vectors → dot = cosine
-        return embeddings
+        """
+        Fit LSA pipeline on chunks and return (fitted_pipeline, embedding_matrix).
+        Uses TF-IDF + TruncatedSVD (300-dim) — no PyTorch, no sentence-transformers.
+        Embeddings are already L2-normalised so dot product == cosine similarity.
+        """
+        pipe = _load_st_model()                    # fresh unfitted pipeline
+        embeddings = pipe.fit_transform(chunks)    # (n_chunks, 300), L2-normed
+        return pipe, embeddings.astype("float32")
 
-    def _cosine_query(query, embeddings, chunks, sources, top_k=5, min_score=0.2):
-        """Pure cosine similarity retrieval — no FAISS required."""
+    def _cosine_query(query, pipe_and_emb, chunks, sources, top_k=5, min_score=0.15):
+        """Pure cosine similarity retrieval using LSA embeddings."""
         from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
-        from sklearn.preprocessing   import normalize as _sk_norm
-        model  = _load_st_model()
-        q_emb  = model.encode([query], convert_to_numpy=True).astype("float32")
-        q_emb  = _sk_norm(q_emb)
-        scores = _cos_sim(q_emb, embeddings)[0]        # shape (n_chunks,)
+        pipe, embeddings = pipe_and_emb
+        q_emb  = pipe.transform([query]).astype("float32")   # already L2-normed by pipeline
+        scores = _cos_sim(q_emb, embeddings)[0]
         ranked = np.argsort(scores)[::-1]
         results = []
         for idx in ranked:
             s = float(scores[idx])
-            if s < min_score: break
+            if s < min_score:
+                break
             results.append((int(idx), s, chunks[idx], sources[idx]))
-            if len(results) >= top_k: break
+            if len(results) >= top_k:
+                break
         return results, scores
 
     def _synthesize_answer(query, results):
@@ -3079,15 +3089,8 @@ elif page=="🔬 Rag":
             '<div style="background:#d1fae5;border:1px solid #6ee7b7;border-radius:8px;'
             'padding:.55rem 1rem;font-size:.8rem;color:#065f46;margin-bottom:.75rem;'
             'display:flex;align-items:center;gap:.5rem;">'
-            '🎯 <strong>Cosine Similarity</strong> · Semantic search active '
-            '· all-MiniLM-L6-v2 sentence embeddings · No external vector DB required</div>',
-            unsafe_allow_html=True)
-    else:
-        st.markdown(
-            '<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;'
-            'padding:.55rem 1rem;font-size:.8rem;color:#92400e;margin-bottom:.75rem;">'
-            '⚠️ sentence-transformers not found — using TF-IDF keyword fallback. '
-            'Install: <code>pip install sentence-transformers</code></div>',
+            '🎯 <strong>LSA Cosine Similarity</strong> · Semantic search active '
+            '· TF-IDF + TruncatedSVD (300-dim) · No PyTorch · No extra install required</div>',
             unsafe_allow_html=True)
 
     # ════════════════════════════════════════════
@@ -3187,15 +3190,16 @@ elif page=="🔬 Rag":
                         semantic_built = False
                         if ST_OK:
                             try:
-                                with st.spinner("🎯 Building cosine-similarity index with sentence embeddings…"):
-                                    _emb = _build_cosine_index(all_chunks)
-                                st.session_state.rag_embeddings   = _emb
+                                with st.spinner("🎯 Building LSA cosine-similarity index (TF-IDF + SVD)…"):
+                                    _pipe, _emb = _build_cosine_index(all_chunks)
+                                # store as a tuple: (fitted_pipeline, embedding_matrix)
+                                st.session_state.rag_embeddings   = (_pipe, _emb)
                                 st.session_state.rag_use_semantic = True
                                 semantic_built = True
-                                st.success(f"✅ Cosine index built — {len(all_chunks)} chunks indexed!")
+                                st.success(f"✅ LSA cosine index built — {len(all_chunks)} chunks, 300-dim embeddings!")
                                 gc.collect()
                             except Exception as _ce:
-                                st.warning(f"Semantic indexing failed ({_ce}), falling back to TF-IDF.")
+                                st.warning(f"LSA indexing failed ({_ce}), falling back to TF-IDF.")
 
                         if not semantic_built:
                             from sklearn.feature_extraction.text import TfidfVectorizer as _TV
@@ -3303,7 +3307,7 @@ elif page=="🔬 Rag":
                         all_scores_arr = None
 
                         if st.session_state.rag_use_semantic and st.session_state.rag_embeddings is not None:
-                            # ── Cosine Similarity semantic search ──
+                            # ── LSA Cosine Similarity semantic search ──
                             results, all_scores_arr = _cosine_query(
                                 query,
                                 st.session_state.rag_embeddings,
@@ -3312,7 +3316,7 @@ elif page=="🔬 Rag":
                                 top_k=top_k,
                                 min_score=min_score,
                             )
-                            engine_label = "🎯 Cosine Similarity"
+                            engine_label = "🎯 LSA Cosine Similarity"
                             badge_bg = "#d1fae5"; badge_border = "#6ee7b7"; badge_text = "#065f46"
                         else:
                             # ── TF-IDF keyword fallback ──
@@ -3343,15 +3347,20 @@ elif page=="🔬 Rag":
             # ── Render last results ──
             if st.session_state.rag_last_results:
                 _q, results, all_scores_arr, engine_label = st.session_state.rag_last_results
+                # derive badge colours from engine label so they're always defined
+                if "LSA" in engine_label or "Cosine" in engine_label:
+                    badge_bg = "#d1fae5"; badge_border = "#6ee7b7"; badge_text = "#065f46"
+                else:
+                    badge_bg = "#fef3c7"; badge_border = "#fde68a"; badge_text = "#92400e"
 
                 if not results:
                     st.warning("No chunks above the threshold. Try lowering the Min score.")
                 else:
                     # ── Header banner ──
                     st.markdown(
-                        f'<div style="background:{badge_bg if "rag_last_results" in st.session_state and st.session_state.rag_last_results else "#d1fae5"};'
-                        f'border:1px solid #6ee7b7;border-radius:8px;padding:.4rem .8rem;'
-                        f'font-size:.75rem;color:#065f46;margin-bottom:.6rem;">'
+                        f'<div style="background:{badge_bg};border:1px solid {badge_border};'
+                        f'border-radius:8px;padding:.4rem .8rem;'
+                        f'font-size:.75rem;color:{badge_text};margin-bottom:.6rem;">'
                         f'{engine_label} — <strong>{len(results)}</strong> result(s) found</div>',
                         unsafe_allow_html=True)
 
@@ -3785,6 +3794,10 @@ elif page == "🧠 Deep Learning":
     # ── Premium gate ──────────────────────────────────────
     if not _require_premium("Deep Learning (CNN / LSTM)"):
         st.stop()
+
+    # ── Lazy-load TensorFlow now (only on this page) ──────
+    with st.spinner("Loading TensorFlow… (first visit only)"):
+        _ensure_tensorflow()
 
     # ── TF availability gate ──────────────────────────────
     if not TF_AVAILABLE:
