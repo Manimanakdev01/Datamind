@@ -150,6 +150,43 @@ warnings.filterwarnings("ignore")
 pd.options.mode.copy_on_write = False
 N_JOBS = max(1, (os.cpu_count() or 2) - 1)
 
+# ── Memory management ─────────────────────────────────────
+# Streamlit Community Cloud limit is 1 GB.
+# We cap dataset rows in-memory, limit cache entries, and
+# force gc after every heavy operation.
+_MAX_ROWS_IN_MEM   = 100_000   # rows — trim uploaded CSV if larger
+_MAX_CACHE_ENTRIES = 3         # keep fewer cached plot objects
+_CACHE_TTL         = 900       # 15 min — expire cache sooner (seconds)
+
+def _trim_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Downsample to _MAX_ROWS_IN_MEM rows if needed, with a user warning."""
+    if len(df) > _MAX_ROWS_IN_MEM:
+        st.warning(
+            f"⚠️ Dataset has {len(df):,} rows — trimmed to {_MAX_ROWS_IN_MEM:,} "
+            "to stay within the 1 GB memory limit. For larger data, run locally."
+        )
+        return df.sample(_MAX_ROWS_IN_MEM, random_state=42).reset_index(drop=True)
+    return df
+
+def _mem_mb() -> float:
+    """Return current process RSS in MB (best-effort)."""
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        return 0.0
+
+def _check_mem(warn_mb: int = 750, critical_mb: int = 900) -> None:
+    """Show memory warning if RSS is approaching the limit."""
+    mb = _mem_mb()
+    if mb >= critical_mb:
+        st.error(
+            f"🚨 Memory critical: ~{mb:.0f} MB used (limit ~1 GB). "
+            "Please clear cache or reduce data size."
+        )
+    elif mb >= warn_mb:
+        st.warning(f"⚠️ Memory usage: ~{mb:.0f} MB — approaching the 1 GB limit.")
+
 # ════════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG + THEME
 # ════════════════════════════════════════════════════════════════════════════
@@ -730,9 +767,9 @@ def _check_razorpay_callback():
 # ════════════════════════════════════════════════════════════════════════════
 #  UTILITIES
 # ════════════════════════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def load_csv(b):
-    return pd.read_csv(io.BytesIO(b))
+    return _trim_df(pd.read_csv(io.BytesIO(b)))
 
 def feature_engineering(df):
     df=df.copy(); encoders={}
@@ -753,7 +790,7 @@ def feature_engineering(df):
             if df[col].skew()>1 and df[col].min()>=0: df[col]=np.log1p(df[col])
     return df.fillna(df.median(numeric_only=True)), encoders
 
-@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def cached_feature_engineering(b):
     return feature_engineering(load_csv(b))
 
@@ -788,28 +825,41 @@ def encode_inputs(raw_inputs,features,label_encoders):
 # ══════════════════════════════════════════════════════════
 #  SHAP
 # ══════════════════════════════════════════════════════════
+# Memory guard: cap rows fed to SHAP to avoid OOM crashes
+_SHAP_MAX_ROWS = 500
+
 def compute_shap(model, X_train, X_test, features):
     try:
-        import shap as _shap   # lazy — only loaded when SHAP is actually requested (~150 MB)
-        inner=model
-        if hasattr(inner,"base_estimator"): inner=inner.base_estimator
-        X_tr2,X_te2=X_train.copy(),X_test.copy()
-        if hasattr(inner,"named_steps"):
-            scaler=inner.named_steps.get("scaler",None)
-            inner=inner.named_steps.get("model",inner)
+        import shap as _shap   # lazy — ~150 MB only loaded when needed
+        inner = model
+        if hasattr(inner, "base_estimator"): inner = inner.base_estimator
+        X_tr2, X_te2 = X_train.copy(), X_test.copy()
+        if hasattr(inner, "named_steps"):
+            scaler = inner.named_steps.get("scaler", None)
+            inner  = inner.named_steps.get("model", inner)
             if scaler:
-                X_tr2=pd.DataFrame(scaler.transform(X_train),columns=features)
-                X_te2=pd.DataFrame(scaler.transform(X_test), columns=features)
-        if hasattr(inner,"feature_importances_"):
-            exp=_shap.TreeExplainer(inner); sv=exp.shap_values(X_te2)
+                X_tr2 = pd.DataFrame(scaler.transform(X_train), columns=features)
+                X_te2 = pd.DataFrame(scaler.transform(X_test),  columns=features)
+        # ── cap rows to avoid memory crash ──
+        if len(X_te2) > _SHAP_MAX_ROWS:
+            X_te2 = X_te2.sample(_SHAP_MAX_ROWS, random_state=42)
+        if len(X_tr2) > _SHAP_MAX_ROWS:
+            X_tr2 = X_tr2.sample(_SHAP_MAX_ROWS, random_state=42)
+        if hasattr(inner, "feature_importances_"):
+            exp = _shap.TreeExplainer(inner)
+            sv  = exp.shap_values(X_te2)
         else:
-            exp=_shap.LinearExplainer(inner,X_tr2); sv=exp.shap_values(X_te2)
-        if isinstance(sv,list):
-            sv=sv[1] if len(sv)==2 else np.mean(np.abs(sv),axis=0)
-        return np.array(sv)
-    except: return None
+            exp = _shap.LinearExplainer(inner, X_tr2)
+            sv  = exp.shap_values(X_te2)
+        if isinstance(sv, list):
+            sv = sv[1] if len(sv) == 2 else np.mean(np.abs(sv), axis=0)
+        result = np.array(sv)
+        del exp; gc.collect()   # free SHAP explainer immediately
+        return result
+    except:
+        return None
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_shap_bar(sv_b,feat_b,feature_names):
     sv=np.frombuffer(sv_b,dtype=np.float64).reshape(-1,len(feature_names))
     ma=np.abs(sv).mean(axis=0); idx=np.argsort(ma)[-15:]
@@ -821,7 +871,7 @@ def _plot_shap_bar(sv_b,feat_b,feature_names):
     ax.set_xlim(0,ma[idx].max()*1.18); fig.tight_layout()
     d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_shap_beeswarm(sv_b,X_b,feature_names):
     sv=np.frombuffer(sv_b,dtype=np.float64).reshape(-1,len(feature_names))
     X =np.frombuffer(X_b, dtype=np.float64).reshape(-1,len(feature_names))
@@ -841,7 +891,7 @@ def _plot_shap_beeswarm(sv_b,X_b,feature_names):
 # ══════════════════════════════════════════════════════════
 #  CACHED EVAL PLOTS
 # ══════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_cm(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -850,7 +900,7 @@ def _plot_cm(yt,yp):
     ax.set_xlabel("Predicted"); ax.set_ylabel("Actual"); ax.set_title("Confusion Matrix")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_roc(yt,pb):
     y1=np.frombuffer(yt,dtype=np.float64); p=np.frombuffer(pb,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -858,7 +908,7 @@ def _plot_roc(yt,pb):
     ax.plot([0,1],[0,1],"--",color="#9ca3af",lw=1); ax.set_title("ROC Curve")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_cal(yt,pb):
     y1=np.frombuffer(yt,dtype=np.float64); p=np.frombuffer(pb,dtype=np.float64)
     fp,mp=calibration_curve(y1,p,n_bins=10)
@@ -869,7 +919,7 @@ def _plot_cal(yt,pb):
     ax.set_title("Calibration Curve"); ax.legend()
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_res(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     res=y1-y2
@@ -882,7 +932,7 @@ def _plot_res(yt,yp):
     axes[1].set_title("Residual Distribution")
     fig.tight_layout(); d=fig_to_bytes(fig); plt.close(fig); return d
 
-@st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+@st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
 def _plot_avp(yt,yp):
     y1=np.frombuffer(yt,dtype=np.float64); y2=np.frombuffer(yp,dtype=np.float64)
     fig,ax=plt.subplots(figsize=(5,4))
@@ -1076,295 +1126,257 @@ def _right_close():
 
 
 # ══════════════════════════════════════════════════════════
-#  INTRO / LANDING PAGE
+#  INTRO / LANDING PAGE  — Animated Cinematic UI
 # ══════════════════════════════════════════════════════════
+# ======================================================
+#  INTRO / LANDING PAGE
+# ======================================================
 if st.session_state.auth_page == "intro":
+
     st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap');
-*{margin:0;padding:0;box-sizing:border-box;}
-html,body,[data-testid="stAppViewContainer"]{background:#050d1e!important;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;600&display=swap');
+html,body,[data-testid="stAppViewContainer"],[data-testid="stMain"]{background:#03070f!important;}
 [data-testid="stHeader"],[data-testid="stToolbar"],[data-testid="stDecoration"],footer{display:none!important;}
 section[data-testid="stSidebar"]{display:none!important;}
-.block-container{padding:0!important;max-width:100%!important;margin:0!important;}
-.intro-wrap{font-family:'IBM Plex Sans',sans-serif;background:#050d1e;color:#fff;min-height:100vh;}
-
-/* NAV */
-.intro-nav{display:flex;align-items:center;justify-content:space-between;
-  padding:1.1rem 3rem;border-bottom:1px solid rgba(255,255,255,.07);
-  background:rgba(5,13,30,.92);position:sticky;top:0;z-index:100;}
-.intro-nav-logo{font-size:1.3rem;font-weight:800;letter-spacing:-.02em;}
-.intro-nav-logo em{color:#60a5fa;font-style:normal;}
-.intro-nav-btns{display:flex;gap:.75rem;}
-.btn-ghost{padding:.45rem 1.2rem;border-radius:8px;font-size:.82rem;font-weight:600;
-  background:transparent;border:1.5px solid rgba(255,255,255,.25);color:#cbd5e1;cursor:pointer;
-  text-decoration:none;display:inline-block;}
-.btn-primary{padding:.45rem 1.4rem;border-radius:8px;font-size:.82rem;font-weight:700;
-  background:linear-gradient(135deg,#1a56db,#2563eb);border:none;color:#fff;cursor:pointer;
-  text-decoration:none;display:inline-block;box-shadow:0 4px 18px rgba(26,86,219,.4);}
-
-/* HERO */
-.intro-hero{text-align:center;padding:5rem 2rem 4rem;position:relative;overflow:hidden;}
-.intro-hero::before{content:"";position:absolute;width:700px;height:700px;border-radius:50%;
-  background:radial-gradient(circle,rgba(59,130,246,.18) 0%,transparent 65%);
-  top:-200px;left:50%;transform:translateX(-50%);pointer-events:none;}
-.intro-hero::after{content:"";position:absolute;width:400px;height:400px;border-radius:50%;
-  background:radial-gradient(circle,rgba(139,92,246,.14) 0%,transparent 65%);
-  bottom:-100px;right:10%;pointer-events:none;}
-.hero-badge{display:inline-flex;align-items:center;gap:.4rem;
-  background:rgba(26,86,219,.18);border:1px solid rgba(26,86,219,.4);
-  border-radius:20px;padding:.3rem .9rem;font-size:.7rem;font-weight:600;
-  color:#93c5fd;letter-spacing:.06em;text-transform:uppercase;margin-bottom:1.5rem;}
-.hero-h1{font-size:3.4rem;font-weight:800;line-height:1.12;letter-spacing:-.04em;
-  color:#f0f9ff;max-width:780px;margin:0 auto 1.2rem;}
-.hero-h1 em{color:#60a5fa;font-style:normal;
-  background:linear-gradient(90deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
-  -webkit-text-fill-color:transparent;}
-.hero-sub{font-size:1.05rem;color:#94a3b8;max-width:560px;margin:0 auto 2.5rem;line-height:1.65;}
-.hero-btns{display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;margin-bottom:3rem;}
-.hero-btn-main{padding:.85rem 2.4rem;border-radius:12px;font-size:.95rem;font-weight:700;
-  background:linear-gradient(135deg,#1a56db,#2563eb);border:none;color:#fff;cursor:pointer;
-  box-shadow:0 6px 28px rgba(26,86,219,.45);transition:all .18s;text-decoration:none;display:inline-block;}
-.hero-btn-sec{padding:.85rem 2.4rem;border-radius:12px;font-size:.95rem;font-weight:600;
-  background:rgba(255,255,255,.07);border:1.5px solid rgba(255,255,255,.2);color:#e2e8f0;
-  cursor:pointer;transition:all .18s;text-decoration:none;display:inline-block;}
-.hero-stats{display:flex;justify-content:center;gap:3rem;flex-wrap:wrap;
-  padding-top:2rem;border-top:1px solid rgba(255,255,255,.07);position:relative;z-index:1;}
-.hero-stat-val{font-family:'IBM Plex Mono',monospace;font-size:1.9rem;font-weight:700;color:#60a5fa;}
-.hero-stat-lbl{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.07em;margin-top:2px;}
-
-/* SECTION HEADINGS */
-.section{padding:4.5rem 2rem;}
-.section-tag{font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;
-  color:#60a5fa;letter-spacing:.12em;text-transform:uppercase;text-align:center;margin-bottom:.7rem;}
-.section-h2{font-size:2rem;font-weight:800;text-align:center;color:#f0f9ff;
-  letter-spacing:-.03em;margin-bottom:.6rem;}
-.section-sub{font-size:.88rem;color:#94a3b8;text-align:center;max-width:520px;
-  margin:0 auto 3rem;line-height:1.6;}
-
-/* FEATURES GRID */
-.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
-  gap:1.2rem;max-width:1100px;margin:0 auto;}
-.feat-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);
-  border-radius:16px;padding:1.5rem 1.6rem;transition:all .2s;}
-.feat-card:hover{background:rgba(255,255,255,.07);border-color:rgba(96,165,250,.3);
-  transform:translateY(-2px);}
-.feat-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;
-  justify-content:center;font-size:1.1rem;margin-bottom:1rem;}
-.feat-icon.blue{background:rgba(59,130,246,.18);border:1px solid rgba(59,130,246,.25);}
-.feat-icon.purple{background:rgba(139,92,246,.18);border:1px solid rgba(139,92,246,.25);}
-.feat-icon.green{background:rgba(16,185,129,.18);border:1px solid rgba(16,185,129,.25);}
-.feat-icon.gold{background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.25);}
-.feat-icon.red{background:rgba(239,68,68,.18);border:1px solid rgba(239,68,68,.25);}
-.feat-icon.cyan{background:rgba(6,182,212,.18);border:1px solid rgba(6,182,212,.25);}
-.feat-title{font-size:.95rem;font-weight:700;color:#f0f9ff;margin-bottom:.4rem;}
-.feat-desc{font-size:.79rem;color:#94a3b8;line-height:1.55;}
-.feat-tag{display:inline-block;margin-top:.75rem;font-size:.63rem;font-weight:600;
-  padding:.18rem .6rem;border-radius:20px;background:rgba(26,86,219,.18);color:#93c5fd;
-  border:1px solid rgba(26,86,219,.3);}
-
-/* INDUSTRIES */
-.ind-section{background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);
-  border-bottom:1px solid rgba(255,255,255,.06);}
-.ind-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
-  gap:1rem;max-width:1000px;margin:0 auto;}
-.ind-card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
-  border-radius:14px;padding:1.3rem 1.2rem;text-align:center;}
-.ind-emoji{font-size:1.8rem;margin-bottom:.6rem;}
-.ind-name{font-size:.88rem;font-weight:700;color:#e2e8f0;margin-bottom:.35rem;}
-.ind-use{font-size:.73rem;color:#94a3b8;line-height:1.5;}
-
-/* PREMIUM TABLE */
-.plan-wrap{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;
-  max-width:760px;margin:0 auto;}
-.plan-card{border-radius:20px;padding:2rem 1.8rem;}
-.plan-free{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);}
-.plan-premium{background:linear-gradient(145deg,rgba(26,86,219,.25),rgba(139,92,246,.2));
-  border:1px solid rgba(96,165,250,.35);}
-.plan-badge{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
-  margin-bottom:.9rem;display:inline-block;padding:.2rem .7rem;border-radius:20px;}
-.plan-badge.free{background:rgba(255,255,255,.1);color:#94a3b8;}
-.plan-badge.prem{background:rgba(96,165,250,.25);color:#93c5fd;}
-.plan-price{font-family:'IBM Plex Mono',monospace;font-size:2.4rem;font-weight:700;
-  color:#f0f9ff;margin-bottom:1.2rem;}
-.plan-price span{font-size:.8rem;font-weight:400;color:#94a3b8;}
-.plan-row{display:flex;align-items:flex-start;gap:.6rem;margin-bottom:.7rem;font-size:.8rem;}
-.plan-row .chk{margin-top:1px;flex-shrink:0;}
-.plan-row.yes .chk{color:#34d399;}
-.plan-row.no{opacity:.45;}
-.plan-row.no .chk{color:#6b7280;}
-.plan-row .txt{color:#cbd5e1;line-height:1.4;}
-.plan-cta{width:100%;margin-top:1.6rem;padding:.75rem;border-radius:10px;
-  font-size:.88rem;font-weight:700;cursor:pointer;border:none;}
-.plan-cta.free-cta{background:rgba(255,255,255,.09);color:#e2e8f0;}
-.plan-cta.prem-cta{background:linear-gradient(135deg,#1a56db,#2563eb);color:#fff;
-  box-shadow:0 6px 20px rgba(26,86,219,.4);}
-
-/* FOOTER */
-.intro-footer{text-align:center;padding:2rem;border-top:1px solid rgba(255,255,255,.07);
-  font-size:.72rem;color:#475569;}
+.block-container{padding:0!important;max-width:100%!important;margin:0!important;position:relative;z-index:10;}
+div[data-testid="stVerticalBlock"]{position:relative;z-index:10;}
+#dm-cv{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;}
+.dm-orb{position:fixed;border-radius:50%;filter:blur(110px);pointer-events:none;z-index:0;}
+.dm-orb1{width:700px;height:700px;background:radial-gradient(circle,rgba(37,99,235,.28),transparent 70%);top:-80px;left:5%;animation:dmOrb1 14s ease-in-out infinite;}
+.dm-orb2{width:550px;height:550px;background:radial-gradient(circle,rgba(124,58,237,.22),transparent 70%);bottom:0;right:5%;animation:dmOrb2 17s ease-in-out infinite;}
+.dm-orb3{width:400px;height:400px;background:radial-gradient(circle,rgba(16,185,129,.15),transparent 70%);top:40%;left:50%;transform:translateX(-50%);animation:dmOrb3 11s ease-in-out infinite;}
+@keyframes dmOrb1{0%,100%{transform:scale(1)}50%{transform:scale(1.12) rotate(6deg)}}
+@keyframes dmOrb2{0%,100%{transform:scale(1)}50%{transform:scale(1.18) rotate(-9deg)}}
+@keyframes dmOrb3{0%,100%{transform:translateX(-50%) scale(1)}50%{transform:translateX(-50%) scale(1.1)}}
+@keyframes dmFadeUp{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:translateY(0)}}
+@keyframes dmPulse{0%,100%{opacity:.7;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}
+@keyframes dmShimmer{0%{background-position:-400px 0}100%{background-position:400px 0}}
+@keyframes dmFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes dmGlow{0%,100%{box-shadow:0 0 20px rgba(96,165,250,.3)}50%{box-shadow:0 0 50px rgba(96,165,250,.6)}}
+@keyframes dmReveal{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:translateY(0)}}
+@keyframes dmLine{from{width:0}to{width:60px}}
+div[data-testid="stColumns"] div[data-testid="stButton"]:first-child > button{background:linear-gradient(135deg,#2563eb,#7c3aed)!important;color:#fff!important;font-family:Inter,sans-serif!important;font-size:1rem!important;font-weight:700!important;padding:.9rem 1.4rem!important;border-radius:14px!important;border:none!important;box-shadow:0 8px 32px rgba(37,99,235,.5)!important;transition:all .25s!important;letter-spacing:-.01em!important;width:100%!important;}
+div[data-testid="stColumns"] div[data-testid="stButton"]:first-child > button:hover{transform:translateY(-2px)!important;box-shadow:0 14px 40px rgba(37,99,235,.65)!important;}
+div[data-testid="stColumns"] div[data-testid="stButton"]:last-child > button{background:rgba(255,255,255,.06)!important;color:#e2e8f0!important;font-family:Inter,sans-serif!important;font-size:1rem!important;font-weight:600!important;padding:.9rem 1.4rem!important;border-radius:14px!important;border:1.5px solid rgba(255,255,255,.18)!important;transition:all .25s!important;width:100%!important;}
+div[data-testid="stColumns"] div[data-testid="stButton"]:last-child > button:hover{background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.35)!important;}
+.dm-section{padding:5.5rem 2rem;position:relative;z-index:10;}
+.dm-stag{font-family:"IBM Plex Mono",monospace;font-size:.65rem;font-weight:700;color:#60a5fa;letter-spacing:.15em;text-transform:uppercase;text-align:center;margin-bottom:.7rem;}
+.dm-sh2{font-size:clamp(1.7rem,3.5vw,2.5rem);font-weight:800;text-align:center;color:#f0f9ff;letter-spacing:-.04em;margin-bottom:.6rem;}
+.dm-ssub{font-size:.88rem;color:#475569;text-align:center;max-width:500px;margin:0 auto 3rem;line-height:1.65;}
+.dm-sline{width:0;height:3px;background:linear-gradient(90deg,#2563eb,#7c3aed);border-radius:2px;margin:.8rem auto 0;animation:dmLine 1s ease .2s forwards;}
+.dm-fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:1.2rem;max-width:1100px;margin:0 auto;}
+.dm-fc{background:rgba(255,255,255,.033);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:1.7rem 1.6rem;position:relative;overflow:hidden;transition:all .3s cubic-bezier(.22,1,.36,1);opacity:0;animation:dmReveal .7s cubic-bezier(.22,1,.36,1) forwards;}
+.dm-fc:hover{transform:translateY(-4px);border-color:rgba(96,165,250,.3);box-shadow:0 20px 60px rgba(0,0,0,.4);}
+.dm-fi{width:46px;height:46px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;margin-bottom:1rem;}
+.dm-fi.bl{background:rgba(37,99,235,.2);border:1px solid rgba(37,99,235,.3);}
+.dm-fi.pu{background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.3);}
+.dm-fi.gr{background:rgba(16,185,129,.2);border:1px solid rgba(16,185,129,.3);}
+.dm-fi.go{background:rgba(245,158,11,.2);border:1px solid rgba(245,158,11,.3);}
+.dm-fi.re{background:rgba(239,68,68,.2);border:1px solid rgba(239,68,68,.3);}
+.dm-fi.cy{background:rgba(6,182,212,.2);border:1px solid rgba(6,182,212,.3);}
+.dm-ft{font-size:.95rem;font-weight:700;color:#f0f9ff;margin-bottom:.4rem;}
+.dm-fd{font-size:.78rem;color:#475569;line-height:1.6;}
+.dm-ftag{display:inline-block;margin-top:.8rem;font-size:.62rem;font-weight:700;padding:.2rem .65rem;border-radius:20px;background:rgba(37,99,235,.15);color:#93c5fd;border:1px solid rgba(37,99,235,.28);}
+.dm-fglow{position:absolute;width:140px;height:140px;border-radius:50%;pointer-events:none;bottom:-30px;right:-30px;opacity:.7;}
+.dm-steps{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:1.3rem;}
+.dm-step{display:flex;align-items:flex-start;gap:1.4rem;padding:1.5rem 1.7rem;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);border-radius:16px;transition:all .3s;opacity:0;animation:dmReveal .7s cubic-bezier(.22,1,.36,1) forwards;}
+.dm-step:hover{background:rgba(255,255,255,.045);transform:translateX(4px);border-color:rgba(96,165,250,.2);}
+.dm-snum{min-width:42px;height:42px;border-radius:11px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;font-family:"IBM Plex Mono",monospace;font-size:.82rem;font-weight:700;color:#fff;flex-shrink:0;box-shadow:0 4px 16px rgba(37,99,235,.4);}
+.dm-stitle{font-size:.95rem;font-weight:700;color:#f0f9ff;margin-bottom:.28rem;}
+.dm-sdesc{font-size:.8rem;color:#475569;line-height:1.55;}
+.dm-igrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:1rem;max-width:1000px;margin:0 auto;}
+.dm-ic{background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.07);border-radius:15px;padding:1.4rem 1.2rem;text-align:center;transition:all .3s;opacity:0;animation:dmReveal .7s cubic-bezier(.22,1,.36,1) forwards;}
+.dm-ic:hover{background:rgba(255,255,255,.055);transform:translateY(-3px);box-shadow:0 12px 40px rgba(0,0,0,.3);border-color:rgba(96,165,250,.22);}
+.dm-ie{font-size:2rem;margin-bottom:.6rem;display:block;animation:dmFloat 4s ease-in-out infinite;}
+.dm-in{font-size:.87rem;font-weight:700;color:#e2e8f0;margin-bottom:.3rem;}
+.dm-iu{font-size:.71rem;color:#475569;line-height:1.55;}
+.dm-pgrid{display:grid;grid-template-columns:1fr 1fr;gap:1.4rem;max-width:760px;margin:0 auto;}
+.dm-pcard{border-radius:22px;padding:2rem 1.8rem;position:relative;overflow:hidden;transition:all .3s;}
+.dm-pfree{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.09);}
+.dm-pprem{background:linear-gradient(145deg,rgba(37,99,235,.18),rgba(124,58,237,.15));border:1px solid rgba(96,165,250,.3);box-shadow:0 0 60px rgba(37,99,235,.12);}
+.dm-pcard:hover{transform:translateY(-3px);}
+.dm-pbadge{font-size:.62rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:.22rem .7rem;border-radius:20px;display:inline-flex;align-items:center;gap:.35rem;margin-bottom:.9rem;}
+.dm-pbfree{background:rgba(255,255,255,.08);color:#64748b;}
+.dm-pbprem{background:rgba(96,165,250,.18);color:#93c5fd;animation:dmGlow 3s infinite;}
+.dm-pprice{font-family:"IBM Plex Mono",monospace;font-size:2.5rem;font-weight:700;color:#f0f9ff;margin-bottom:1.3rem;line-height:1;}
+.dm-pprice span{font-size:.78rem;font-weight:400;color:#475569;}
+.dm-prow{display:flex;align-items:flex-start;gap:.55rem;margin-bottom:.7rem;font-size:.8rem;}
+.dm-prow .ck{margin-top:1px;flex-shrink:0;font-size:.85rem;}
+.dm-prow.yes .ck{color:#34d399;}
+.dm-prow.no{opacity:.35;}
+.dm-prow.no .ck{color:#475569;}
+.dm-prow .tx{color:#cbd5e1;line-height:1.4;}
+.dm-ptag{position:absolute;top:1.1rem;right:1.1rem;font-size:.58rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;padding:.2rem .6rem;border-radius:20px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#fff;}
+.dm-foot{position:relative;z-index:10;text-align:center;padding:2rem;border-top:1px solid rgba(255,255,255,.05);}
+.dm-flogo{font-size:1.05rem;font-weight:800;color:#f0f9ff;margin-bottom:.4rem;}
+.dm-fsub{font-size:.7rem;color:#334155;}
+@media(max-width:640px){.dm-pgrid{grid-template-columns:1fr;}.dm-section{padding:3.5rem 1rem;}}
 </style>
-<div class="intro-wrap">
+<canvas id="dm-cv"></canvas>
+<div class="dm-orb dm-orb1"></div>
+<div class="dm-orb dm-orb2"></div>
+<div class="dm-orb dm-orb3"></div>
+<script>
+(function(){
+  var c=document.getElementById("dm-cv");if(!c)return;
+  var ctx=c.getContext("2d"),W,H,pts=[],mx=-999,my=-999;
+  document.addEventListener("mousemove",function(e){mx=e.clientX;my=e.clientY;});
+  function rsz(){W=c.width=innerWidth;H=c.height=innerHeight;}
+  rsz();window.addEventListener("resize",rsz);
+  var N=Math.min(90,Math.floor(innerWidth/15));
+  for(var i=0;i<N;i++){pts.push({x:Math.random()*innerWidth,y:Math.random()*innerHeight,vx:(Math.random()-.5)*.3,vy:(Math.random()-.5)*.3,r:Math.random()*1.3+.3,a:Math.random()*.4+.1,h:Math.random()<.5?214:(Math.random()<.5?262:160)});}
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    for(var i=0;i<pts.length;i++){var p=pts[i];var dx=p.x-mx,dy=p.y-my,d=Math.sqrt(dx*dx+dy*dy);if(d<120){p.vx+=dx/d*.04;p.vy+=dy/d*.04;}p.vx*=.994;p.vy*=.994;p.x=(p.x+p.vx+W)%W;p.y=(p.y+p.vy+H)%H;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fillStyle="hsla("+p.h+",78%,70%,"+p.a+")";ctx.fill();}
+    for(var i=0;i<pts.length;i++){for(var j=i+1;j<pts.length;j++){var dx=pts[i].x-pts[j].x,dy=pts[i].y-pts[j].y,d=Math.sqrt(dx*dx+dy*dy);if(d<100){ctx.beginPath();ctx.moveTo(pts[i].x,pts[i].y);ctx.lineTo(pts[j].x,pts[j].y);ctx.strokeStyle="rgba(96,165,250,"+(0.12*(1-d/100))+")";ctx.lineWidth=.5;ctx.stroke();}}}
+    requestAnimationFrame(draw);
+  }
+  draw();
+  var el=document.getElementById("dm-typing");
+  if(el){var words=["Writing Code","Complex Pipelines","Data Science Degrees","Manual Tuning"];var wi=0,ci=0,dl=false;function tick(){var w=words[wi];if(!dl){el.textContent=w.slice(0,ci+1);ci++;if(ci===w.length){dl=true;setTimeout(tick,1800);return;}setTimeout(tick,85);}else{el.textContent=w.slice(0,ci-1);ci--;if(ci===0){dl=false;wi=(wi+1)%words.length;setTimeout(tick,280);return;}setTimeout(tick,42);}}setTimeout(tick,1400);}
+  var obs=new IntersectionObserver(function(e){e.forEach(function(x){if(x.isIntersecting)x.target.style.animationPlayState="running";});},{threshold:.08});
+  document.querySelectorAll(".dm-fc,.dm-step,.dm-ic").forEach(function(el){el.style.animationPlayState="paused";obs.observe(el);});
+})();
+</script>
+""", unsafe_allow_html=True)
 
-<!-- NAV -->
-<div class="intro-nav">
-  <div class="intro-nav-logo">&#9672; DataMind <em>AI</em></div>
-  <div class="intro-nav-btns">
-    <a class="btn-ghost" href="#" onclick="window.location.reload()">Sign In</a>
-    <a class="btn-primary" href="#" onclick="window.location.reload()">Get Started Free</a>
+    # ── HERO ──────────────────────────────────────────────
+    st.markdown("""
+<div style="position:relative;z-index:10;text-align:center;padding:7rem 1.5rem 3rem;font-family:Inter,sans-serif;color:#fff;">
+  <div style="display:inline-flex;align-items:center;gap:.45rem;padding:.3rem 1rem;background:rgba(37,99,235,.12);border:1px solid rgba(37,99,235,.4);border-radius:20px;font-size:.67rem;font-weight:700;color:#93c5fd;letter-spacing:.1em;text-transform:uppercase;margin-bottom:1.8rem;animation:dmFadeUp .6s .1s both;">
+    <span style="width:6px;height:6px;border-radius:50%;background:#60a5fa;animation:dmPulse 2s infinite;display:inline-block;flex-shrink:0;"></span>
+    Production-Ready AutoML Platform
   </div>
-</div>
-
-<!-- HERO -->
-<div class="intro-hero">
-  <div class="hero-badge">&#9889; Production-Ready AutoML Platform</div>
-  <h1 class="hero-h1">Train AI Models<br>Without <em>Writing Code</em></h1>
-  <p class="hero-sub">Upload your data, click train, get results. DataMind AI brings AutoML, Deep Learning, NLP, RAG, and Chatbot into one powerful platform.</p>
-  <div class="hero-btns">
-    <a class="hero-btn-main" id="hero-start">&#128640; Get Started Free</a>
-    <a class="hero-btn-sec" id="hero-login">Sign In</a>
+  <h1 style="font-size:clamp(2.3rem,6vw,4.6rem);font-weight:900;line-height:1.09;letter-spacing:-.05em;color:#f0f9ff;max-width:880px;margin:0 auto .5rem;animation:dmFadeUp .7s .25s both;">
+    Train AI Without<br>
+    <span id="dm-typing" style="background:linear-gradient(120deg,#60a5fa,#a78bfa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;background-size:200%;animation:dmShimmer 4s linear infinite;display:inline-block;min-width:10ch;">Writing Code</span>
+  </h1>
+  <p style="font-size:1rem;color:#64748b;max-width:520px;margin:.9rem auto 0;line-height:1.72;animation:dmFadeUp .7s .4s both;">
+    Upload data, click Train, get results. DataMind AI unifies AutoML, Deep Learning, NLP, RAG and Chatbot Studio in one platform &mdash; completely free to start.
+  </p>
+  <div style="display:inline-flex;gap:0;margin-top:2.8rem;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:18px;overflow:hidden;animation:dmFadeUp .8s .55s both;">
+    <div style="padding:1.3rem 2rem;text-align:center;border-right:1px solid rgba(255,255,255,.07)"><div style="font-family:'IBM Plex Mono',monospace;font-size:1.75rem;font-weight:700;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">10+</div><div style="font-size:.6rem;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin-top:2px">AI Modules</div></div>
+    <div style="padding:1.3rem 2rem;text-align:center;border-right:1px solid rgba(255,255,255,.07)"><div style="font-family:'IBM Plex Mono',monospace;font-size:1.75rem;font-weight:700;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">15+</div><div style="font-size:.6rem;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin-top:2px">ML Algorithms</div></div>
+    <div style="padding:1.3rem 2rem;text-align:center;border-right:1px solid rgba(255,255,255,.07)"><div style="font-family:'IBM Plex Mono',monospace;font-size:1.75rem;font-weight:700;background:linear-gradient(135deg,#34d399,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">Free</div><div style="font-size:.6rem;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin-top:2px">To Start</div></div>
+    <div style="padding:1.3rem 2rem;text-align:center;"><div style="font-family:'IBM Plex Mono',monospace;font-size:1.75rem;font-weight:700;background:linear-gradient(135deg,#f59e0b,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">LSA</div><div style="font-size:.6rem;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin-top:2px">Semantic Search</div></div>
   </div>
-  <div class="hero-stats">
-    <div><div class="hero-stat-val">10+</div><div class="hero-stat-lbl">AI Modules</div></div>
-    <div><div class="hero-stat-val">15+</div><div class="hero-stat-lbl">ML Algorithms</div></div>
-    <div><div class="hero-stat-val">Cosine</div><div class="hero-stat-lbl">Semantic Search</div></div>
-    <div><div class="hero-stat-val">Free</div><div class="hero-stat-lbl">To Start</div></div>
-  </div>
-</div>
-
-<!-- FEATURES -->
-<div class="section">
-  <div class="section-tag">&#127775; Core Features</div>
-  <div class="section-h2">Everything You Need to Build AI</div>
-  <div class="section-sub">From raw CSV to trained model in minutes — no data science degree required.</div>
-  <div class="feat-grid">
-    <div class="feat-card">
-      <div class="feat-icon blue">&#129302;</div>
-      <div class="feat-title">AutoML Engine</div>
-      <div class="feat-desc">Auto-selects and tunes the best model from 15+ algorithms including Random Forest, XGBoost, and Logistic Regression. One click to train, compare, and export.</div>
-      <div class="feat-tag">Classification &middot; Regression</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon purple">&#129504;</div>
-      <div class="feat-title">Deep Learning (CNN &middot; LSTM)</div>
-      <div class="feat-desc">Build and train TensorFlow image classifiers (CNN) and sequence models (LSTM) with a visual interface. No code needed — configure layers and hit train.</div>
-      <div class="feat-tag">TensorFlow &middot; Keras</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon green">&#128270;</div>
-      <div class="feat-title">RAG with Cosine Similarity</div>
-      <div class="feat-desc">Upload PDFs, CSVs, or docs and ask natural language questions. Powered by LSA (TF-IDF + SVD) cosine similarity — no external vector DB, no PyTorch, no extra install needed.</div>
-      <div class="feat-tag">Cosine Similarity &middot; Semantic Search</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon gold">&#128172;</div>
-      <div class="feat-title">Custom Chatbot Studio</div>
-      <div class="feat-desc">Upload any Q&amp;A or intent CSV and instantly train a chatbot. Deploy it right inside the app with a live chat interface and confidence scoring.</div>
-      <div class="feat-tag">NLP &middot; Intent Classification</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon cyan">&#128202;</div>
-      <div class="feat-title">NLP &amp; Text Classification</div>
-      <div class="feat-desc">Train text classifiers for sentiment analysis, spam detection, topic tagging and more. TF-IDF vectorization with Naive Bayes, SVM, and Logistic Regression.</div>
-      <div class="feat-tag">Sentiment &middot; Spam &middot; Topics</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon red">&#128200;</div>
-      <div class="feat-title">SHAP Explainability</div>
-      <div class="feat-desc">Understand why your model makes every prediction. SHAP summary plots, force plots, and waterfall charts for full model transparency.</div>
-      <div class="feat-tag">XAI &middot; Interpretability</div>
-    </div>
-  </div>
-</div>
-
-<!-- INDUSTRIES -->
-<div class="section ind-section">
-  <div class="section-tag">&#127968; Industry Use Cases</div>
-  <div class="section-h2">Built for Every Industry</div>
-  <div class="section-sub">DataMind AI powers real decisions across healthcare, finance, retail, and more.</div>
-  <div class="ind-grid">
-    <div class="ind-card">
-      <div class="ind-emoji">&#127973;</div>
-      <div class="ind-name">Healthcare</div>
-      <div class="ind-use">Disease prediction &middot; Patient risk scoring &middot; Medical report Q&amp;A with RAG</div>
-    </div>
-    <div class="ind-card">
-      <div class="ind-emoji">&#128178;</div>
-      <div class="ind-name">Finance</div>
-      <div class="ind-use">Fraud detection &middot; Credit scoring &middot; Loan default prediction</div>
-    </div>
-    <div class="ind-card">
-      <div class="ind-emoji">&#128722;</div>
-      <div class="ind-name">Retail &amp; E-commerce</div>
-      <div class="ind-use">Churn prediction &middot; Product recommendation &middot; Demand forecasting</div>
-    </div>
-    <div class="ind-card">
-      <div class="ind-emoji">&#127979;</div>
-      <div class="ind-name">Education</div>
-      <div class="ind-use">Student performance prediction &middot; Custom FAQ chatbot &middot; Document search</div>
-    </div>
-    <div class="ind-card">
-      <div class="ind-emoji">&#129302;</div>
-      <div class="ind-name">Manufacturing</div>
-      <div class="ind-use">Predictive maintenance &middot; Quality defect detection &middot; Sensor anomaly detection</div>
-    </div>
-  </div>
-</div>
-
-<!-- PRICING -->
-<div class="section">
-  <div class="section-tag">&#128176; Pricing</div>
-  <div class="section-h2">Start Free. Upgrade When Ready.</div>
-  <div class="section-sub">No credit card needed to start. Upgrade to Premium for unlimited power.</div>
-  <div class="plan-wrap">
-    <div class="plan-card plan-free">
-      <div class="plan-badge free">Free</div>
-      <div class="plan-price">&#8377;0 <span>/ forever</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">2 projects</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">AutoML (all algorithms)</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Data analysis &amp; EDA</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">SHAP explainability</span></div>
-      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Deep Learning (CNN/LSTM)</span></div>
-      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">RAG / Document Q&amp;A</span></div>
-      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Chatbot Studio</span></div>
-      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">NLP Text Classification</span></div>
-      <div class="plan-row no"><span class="chk">&#10007;</span><span class="txt">Clustering &amp; Auto Labeling</span></div>
-    </div>
-    <div class="plan-card plan-premium">
-      <div class="plan-badge prem">&#11088; Premium</div>
-      <div class="plan-price">&#8377;1000 <span>/ month</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Unlimited projects</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Everything in Free</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Deep Learning (CNN/LSTM)</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">RAG with cosine similarity semantic search</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Chatbot Studio</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">NLP Text Classification</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Clustering &amp; Auto Labeling</span></div>
-      <div class="plan-row yes"><span class="chk">&#10003;</span><span class="txt">Priority support</span></div>
-    </div>
-  </div>
-</div>
-
-<!-- FOOTER -->
-<div class="intro-footer">
-  &#9672; DataMind AI v5.0 &middot; Production AutoML Platform &middot; Built with &#10084; for data scientists
-</div>
-
+  <p style="font-size:.78rem;color:#334155;margin-top:2rem;animation:dmFadeUp .7s .7s both;">Choose how to begin &darr;</p>
 </div>
 """, unsafe_allow_html=True)
 
-    # Streamlit buttons overlaid for navigation
-    _ib1, _ib2, _ib3 = st.columns([1, 1, 1])
-    with _ib1:
+    # ── CTA BUTTONS (real Streamlit widgets) ───────────────
+    _bc1, _bc2, _bc3, _bc4 = st.columns([1, 2, 2, 1])
+    with _bc2:
         if st.button("&#128640; Get Started Free", key="intro_signup", use_container_width=True):
             st.session_state.auth_page = "signup"; st.rerun()
-    with _ib2:
-        if st.button("Sign In", key="intro_login", use_container_width=True):
+    with _bc3:
+        if st.button("Sign In  &rarr;", key="intro_login", use_container_width=True):
             st.session_state.auth_page = "login"; st.rerun()
-    with _ib3:
-        if st.button("View Pricing &#8593;", key="intro_pricing", use_container_width=True):
+
+    # ── FEATURES ──────────────────────────────────────────
+    st.markdown("""
+<div class="dm-section">
+  <div class="dm-stag">Core Capabilities</div><div class="dm-sh2">Everything AI, In One Place</div>
+  <div class="dm-ssub">From raw CSV to production model in minutes. No data science degree required.</div>
+  <div class="dm-sline"></div><div style="height:2.5rem"></div>
+  <div class="dm-fgrid">
+    <div class="dm-fc" style="animation-delay:.04s"><div class="dm-fi bl">&#129302;</div><div class="dm-ft">AutoML Engine</div><div class="dm-fd">Auto-selects and tunes the best model from 15+ algorithms &mdash; Random Forest, XGBoost, Logistic Regression and more. One click to train, compare and export.</div><div class="dm-ftag">Classification &middot; Regression</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(37,99,235,.15),transparent 70%)"></div></div>
+    <div class="dm-fc" style="animation-delay:.10s"><div class="dm-fi pu">&#129504;</div><div class="dm-ft">Deep Learning &mdash; CNN &amp; LSTM</div><div class="dm-fd">TensorFlow image classifiers (CNN) and text sequence models (LSTM) with a visual layer builder. Configure, train and evaluate &mdash; zero code needed.</div><div class="dm-ftag">TensorFlow &middot; Keras</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(124,58,237,.15),transparent 70%)"></div></div>
+    <div class="dm-fc" style="animation-delay:.16s"><div class="dm-fi gr">&#128270;</div><div class="dm-ft">RAG + Cosine Similarity</div><div class="dm-fd">Upload PDFs, CSVs or docs and ask natural language questions. Powered by LSA cosine similarity &mdash; no vector DB, no PyTorch, no extra install needed.</div><div class="dm-ftag">Semantic Search &middot; LSA</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(16,185,129,.15),transparent 70%)"></div></div>
+    <div class="dm-fc" style="animation-delay:.22s"><div class="dm-fi go">&#128172;</div><div class="dm-ft">Chatbot Studio</div><div class="dm-fd">Upload any Q&amp;A CSV and instantly train a chatbot. Live chat interface, confidence scoring and intent matching &mdash; deployed right inside the app.</div><div class="dm-ftag">NLP &middot; Intent Classification</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(245,158,11,.15),transparent 70%)"></div></div>
+    <div class="dm-fc" style="animation-delay:.28s"><div class="dm-fi cy">&#128202;</div><div class="dm-ft">NLP Text Classification</div><div class="dm-fd">Sentiment analysis, spam detection, topic tagging and more. TF-IDF with Naive Bayes, SVM and Logistic Regression classifiers out of the box.</div><div class="dm-ftag">Sentiment &middot; Spam &middot; Topics</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(6,182,212,.15),transparent 70%)"></div></div>
+    <div class="dm-fc" style="animation-delay:.34s"><div class="dm-fi re">&#128200;</div><div class="dm-ft">SHAP Explainability</div><div class="dm-fd">Understand every prediction. SHAP summary plots, force plots and waterfall charts deliver complete model transparency and build trust with stakeholders.</div><div class="dm-ftag">XAI &middot; Interpretability</div><div class="dm-fglow" style="background:radial-gradient(circle,rgba(239,68,68,.15),transparent 70%)"></div></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── HOW IT WORKS ──────────────────────────────────────
+    st.markdown("""
+<div class="dm-section" style="background:rgba(255,255,255,.015);border-top:1px solid rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.05)">
+  <div class="dm-stag">Process</div><div class="dm-sh2">From Data to AI in 4 Steps</div>
+  <div class="dm-ssub">No ML knowledge needed. DataMind AI guides every step &mdash; just bring your data.</div>
+  <div class="dm-sline"></div><div style="height:2.5rem"></div>
+  <div class="dm-steps">
+    <div class="dm-step" style="animation-delay:.05s"><div class="dm-snum">01</div><div><div class="dm-stitle">Upload Your Data</div><div class="dm-sdesc">CSV, Excel, PDF, TXT &mdash; drag and drop any file. DataMind auto-detects columns, data types, and target variables instantly.</div></div></div>
+    <div class="dm-step" style="animation-delay:.13s"><div class="dm-snum">02</div><div><div class="dm-stitle">Choose Your Task</div><div class="dm-sdesc">Classification, regression, deep learning, NLP, RAG, chatbot &mdash; pick the module that fits your goal. Guided UI handles the rest.</div></div></div>
+    <div class="dm-step" style="animation-delay:.21s"><div class="dm-snum">03</div><div><div class="dm-stitle">Train with One Click</div><div class="dm-sdesc">AutoML picks and tunes the best model automatically. Watch accuracy, F1, and ROC metrics update live as training runs.</div></div></div>
+    <div class="dm-step" style="animation-delay:.29s"><div class="dm-snum">04</div><div><div class="dm-stitle">Explain, Export &amp; Deploy</div><div class="dm-sdesc">SHAP plots reveal why each prediction was made. Export the trained model as a .pkl file for production deployment anywhere.</div></div></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── INDUSTRIES ────────────────────────────────────────
+    st.markdown("""
+<div class="dm-section">
+  <div class="dm-stag">Industries</div><div class="dm-sh2">Built for Every Domain</div>
+  <div class="dm-ssub">DataMind AI powers real decisions across healthcare, finance, retail, and beyond.</div>
+  <div class="dm-sline"></div><div style="height:2.5rem"></div>
+  <div class="dm-igrid">
+    <div class="dm-ic" style="animation-delay:.04s"><span class="dm-ie">&#127973;</span><div class="dm-in">Healthcare</div><div class="dm-iu">Disease prediction &middot; Patient risk scoring &middot; Medical report Q&amp;A</div></div>
+    <div class="dm-ic" style="animation-delay:.10s"><span class="dm-ie" style="animation-delay:.5s">&#128178;</span><div class="dm-in">Finance</div><div class="dm-iu">Fraud detection &middot; Credit scoring &middot; Loan default prediction</div></div>
+    <div class="dm-ic" style="animation-delay:.16s"><span class="dm-ie" style="animation-delay:1s">&#128722;</span><div class="dm-in">Retail</div><div class="dm-iu">Churn prediction &middot; Recommendations &middot; Demand forecasting</div></div>
+    <div class="dm-ic" style="animation-delay:.22s"><span class="dm-ie" style="animation-delay:1.5s">&#127979;</span><div class="dm-in">Education</div><div class="dm-iu">Performance prediction &middot; FAQ chatbot &middot; Document search</div></div>
+    <div class="dm-ic" style="animation-delay:.28s"><span class="dm-ie" style="animation-delay:2s">&#127981;</span><div class="dm-in">Manufacturing</div><div class="dm-iu">Predictive maintenance &middot; Defect detection &middot; Anomaly scoring</div></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── PRICING ───────────────────────────────────────────
+    st.markdown("""
+<div class="dm-section" style="background:rgba(255,255,255,.012);border-top:1px solid rgba(255,255,255,.05)">
+  <div class="dm-stag">Pricing</div><div class="dm-sh2">Start Free. Upgrade When Ready.</div>
+  <div class="dm-ssub">No credit card needed. Full AutoML access forever free &mdash; unlock everything with Premium.</div>
+  <div class="dm-sline"></div><div style="height:2.5rem"></div>
+  <div class="dm-pgrid">
+    <div class="dm-pcard dm-pfree">
+      <div class="dm-pbadge dm-pbfree">Free Plan</div>
+      <div class="dm-pprice">&#8377;0 <span>/ forever</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">2 projects</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">AutoML (all 15+ algorithms)</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Full data analysis &amp; EDA</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">SHAP explainability</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Model export (.pkl)</span></div>
+      <div class="dm-prow no"><span class="ck">&#10007;</span><span class="tx">Deep Learning CNN/LSTM</span></div>
+      <div class="dm-prow no"><span class="ck">&#10007;</span><span class="tx">RAG Document Q&amp;A</span></div>
+      <div class="dm-prow no"><span class="ck">&#10007;</span><span class="tx">Chatbot Studio</span></div>
+      <div class="dm-prow no"><span class="ck">&#10007;</span><span class="tx">NLP Classification</span></div>
+    </div>
+    <div class="dm-pcard dm-pprem">
+      <div class="dm-ptag">POPULAR</div>
+      <div class="dm-pbadge dm-pbprem">&#11088; Premium</div>
+      <div class="dm-pprice">&#8377;1000 <span>/ month</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Unlimited projects</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Everything in Free</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Deep Learning CNN/LSTM</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">RAG with cosine semantic search</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Chatbot Studio</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">NLP Text Classification</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Clustering &amp; Auto Labeling</span></div>
+      <div class="dm-prow yes"><span class="ck">&#10003;</span><span class="tx">Priority support</span></div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── BOTTOM CTA + FOOTER ───────────────────────────────
+    _fc1, _fc2, _fc3, _fc4 = st.columns([1, 2, 2, 1])
+    with _fc2:
+        if st.button("&#128640; Create Free Account", key="intro_signup2", use_container_width=True):
             st.session_state.auth_page = "signup"; st.rerun()
+    with _fc3:
+        if st.button("Sign In to Account", key="intro_login2", use_container_width=True):
+            st.session_state.auth_page = "login"; st.rerun()
+
+    st.markdown("""
+<div class="dm-foot">
+  <div class="dm-flogo">DataMind AI &mdash; Production AutoML Platform</div>
+  <div class="dm-fsub">v5.0 &middot; Built for everyone who works with data</div>
+</div>
+""", unsafe_allow_html=True)
+
     st.stop()
+
 
 
 if st.session_state.auth_page == "login":
@@ -1652,6 +1664,10 @@ with st.sidebar:
             _do_logout()
             st.rerun()
 
+# ── memory guard — runs once per interaction on every page ──
+_check_mem()
+gc.collect()
+
 # ══════════════════════════════════════════════════════════
 #  PAGE: ANALYSIS
 # ══════════════════════════════════════════════════════════
@@ -1896,7 +1912,7 @@ if page=="📊 Analysis":
             with _cr2: _corr_thresh = st.slider("Highlight |corr| ≥", 0.0, 1.0, 0.7, 0.05, key="corr_thr")
             with _cr3: _corr_mask   = st.checkbox("Mask upper triangle", value=True, key="corr_mask")
 
-            @st.cache_data(show_spinner=False, max_entries=5, ttl=1800)
+            @st.cache_data(show_spinner=False, max_entries=_MAX_CACHE_ENTRIES, ttl=_CACHE_TTL)
             def _corr_cached(b, method): return load_csv(b).select_dtypes(include=np.number).corr(method=method)
             corr = _corr_cached(fb, _corr_method)
 
@@ -2510,8 +2526,16 @@ elif page=="🤖 AutoML":
 
             with st.spinner("Training in progress…"):
                 _t0 = _time.time()
-                strat = y if (problem=="Classification" and y.nunique()>1) else None
-                X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=test_size,random_state=random_seed,stratify=strat)
+                # ── cap rows to stay within 1 GB memory limit ──
+                _MAX_TRAIN = 50_000
+                if len(X) > _MAX_TRAIN:
+                    st.info(f"ℹ️ Dataset trimmed to {_MAX_TRAIN:,} rows for training to avoid memory crash.")
+                    _idx = np.random.RandomState(int(random_seed)).permutation(len(X))[:_MAX_TRAIN]
+                    X_tr_full = X.iloc[_idx]; y_tr_full = y.iloc[_idx]
+                else:
+                    X_tr_full = X; y_tr_full = y
+                strat = y_tr_full if (problem=="Classification" and y_tr_full.nunique()>1) else None
+                X_train,X_test,y_train,y_test = train_test_split(X_tr_full,y_tr_full,test_size=test_size,random_state=random_seed,stratify=strat)
                 pipeline.fit(X_train, y_train)
                 preds = pipeline.predict(X_test)
                 proba = None
@@ -2520,7 +2544,7 @@ elif page=="🤖 AutoML":
                 if problem=="Classification":
                     score = accuracy_score(y_test,preds)
                     f1    = f1_score(y_test,preds,average="weighted")
-                    try: proba=pipeline.predict_proba(X_test); auc=roc_auc_score(y_test,proba[:,1]) if y.nunique()==2 else None
+                    try: proba=pipeline.predict_proba(X_test); auc=roc_auc_score(y_test,proba[:,1]) if y_tr_full.nunique()==2 else None
                     except: auc=None
                     train_score = accuracy_score(y_train, pipeline.predict(X_train))
                 else:
@@ -2528,7 +2552,7 @@ elif page=="🤖 AutoML":
                     rmse=mean_squared_error(y_test,preds)**0.5; f1=auc=None
                     train_score = r2_score(y_train, pipeline.predict(X_train))
 
-                cv_scores = cross_val_score(pipeline,X,y,cv=cv_folds,n_jobs=N_JOBS,
+                cv_scores = cross_val_score(pipeline,X_tr_full,y_tr_full,cv=cv_folds,n_jobs=N_JOBS,
                                             scoring="accuracy" if problem=="Classification" else "r2")
 
                 # SHAP
@@ -2538,8 +2562,9 @@ elif page=="🤖 AutoML":
                 else:
                     st.session_state.shap_values=None; st.session_state.shap_X=None
 
-            st.session_state.update(model=pipeline, features=features, train_df=X,
+            st.session_state.update(model=pipeline, features=features, train_df=X_tr_full,
                                     y_test=y_test, preds=preds, proba=proba)
+            del X_tr_full, y_tr_full   # free merged frame
             gc.collect()
 
             record = {"model":model_name,"problem":problem,"score":round(score,4),
@@ -4002,10 +4027,20 @@ python -c "import tensorflow as tf; print(tf.__version__)"
 
                             X_cnn = np.stack(imgs)
                             y_cnn = np.array(lbls, dtype=np.int32)
+                            del imgs, lbls; gc.collect()   # free raw list immediately
+
+                            # ── cap images to avoid OOM ──
+                            _CNN_MAX = 2000
+                            if len(X_cnn) > _CNN_MAX:
+                                st.info(f"ℹ️ Capped to {_CNN_MAX} images to avoid memory crash.")
+                                _perm2 = np.random.permutation(len(X_cnn))[:_CNN_MAX]
+                                X_cnn = X_cnn[_perm2]; y_cnn = y_cnn[_perm2]
+
                             perm  = np.random.permutation(len(X_cnn))
                             sp    = max(1, int(0.8 * len(perm)))
                             Xtr, Xte = X_cnn[perm[:sp]], X_cnn[perm[sp:]]
                             ytr, yte = y_cnn[perm[:sp]], y_cnn[perm[sp:]]
+                            del X_cnn, y_cnn; gc.collect()
 
                             # ── ImageDataGenerator ──
                             try:
@@ -4046,6 +4081,7 @@ python -c "import tensorflow as tf; print(tf.__version__)"
                             st.session_state.dl_type     = "cnn"
                             st.session_state.dl_classes  = label_list
                             st.session_state.dl_img_size = (cnn_h, cnn_w)
+                            del Xtr, Xte, ytr, yte; gc.collect()
 
                         h_c = hist_c.history
                         val_acc_c  = float(max(h_c.get("val_accuracy", [0])))
@@ -4186,6 +4222,12 @@ python -c "import tensorflow as tf; print(tf.__version__)"
                     elif st.button("🚀 Train LSTM", key="lstm_train_btn"):
                         try:
                             with st.spinner("Tokenizing text and training LSTM…"):
+                                # ── cap rows for LSTM to avoid OOM ──
+                                _LSTM_MAX = 20_000
+                                if len(lstm_work) > _LSTM_MAX:
+                                    st.info(f"ℹ️ Capped to {_LSTM_MAX:,} rows for LSTM training.")
+                                    lstm_work = lstm_work.sample(_LSTM_MAX, random_state=42)
+
                                 cls_l  = sorted(lstm_work["label"].astype(str).unique().tolist())
                                 lmap_l = {l: i for i, l in enumerate(cls_l)}
                                 y_l    = lstm_work["label"].astype(str).map(lmap_l).values.astype(np.int32)
@@ -4194,11 +4236,13 @@ python -c "import tensorflow as tf; print(tf.__version__)"
                                 tok_l.fit_on_texts(lstm_work["text"].tolist())
                                 seqs_l = tok_l.texts_to_sequences(lstm_work["text"].tolist())
                                 X_l    = pad_sequences(seqs_l, maxlen=lstm_ml, padding="post", truncating="post")
+                                del seqs_l; gc.collect()
 
                                 perm_l = np.random.permutation(len(X_l))
                                 sp_l   = max(1, int(0.8 * len(perm_l)))
                                 Xtr_l, Xte_l = X_l[perm_l[:sp_l]], X_l[perm_l[sp_l:]]
                                 ytr_l, yte_l = y_l[perm_l[:sp_l]], y_l[perm_l[sp_l:]]
+                                del X_l, y_l; gc.collect()
 
                                 lstm_mdl = _build_lstm(len(cls_l), lstm_voc, lstm_ml, lstm_emb, lstm_units)
                                 es_l     = keras.callbacks.EarlyStopping(
@@ -4214,6 +4258,7 @@ python -c "import tensorflow as tf; print(tf.__version__)"
                                 st.session_state.dl_tokenizer = tok_l
                                 st.session_state.dl_classes   = cls_l
                                 st.session_state["dl_maxlen"] = lstm_ml
+                                del Xtr_l, Xte_l, ytr_l, yte_l; gc.collect()
 
                             h_l  = hist_l.history
                             va_l = float(max(h_l.get("val_accuracy", [0])))
